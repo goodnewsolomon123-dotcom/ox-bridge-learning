@@ -11,19 +11,20 @@ from passlib.context import CryptContext
 import jwt
 from datetime import datetime, timedelta, timezone
 
-# --- CONFIG ---
+# --- CONFIGURATION ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 GROQ_KEY = os.getenv("GROQ_KEY")
 GEMINI_KEY = os.getenv("GEMINI_KEY")
 OR_KEY = os.getenv("OPENROUTER_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY", "oxbridge_secret")
 
+# Database Setup
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# --- MODELS ---
+# --- DATABASE MODELS ---
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
@@ -31,7 +32,10 @@ class User(Base):
     email = Column(String, unique=True)
     hashed_password = Column(String)
     full_name = Column(String, nullable=True)
+    profile_pic = Column(String, nullable=True)
+    bio = Column(String, nullable=True)
     progress_score = Column(Float, default=0.0)
+    last_learned_topic = Column(String, nullable=True)
 
 class Subject(Base):
     __tablename__ = "subjects"
@@ -56,7 +60,7 @@ class Question(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# --- SCHEMAS ---
+# --- PYDANTIC SCHEMAS ---
 class UserCreate(BaseModel):
     username: str; email: str; password: str
 class SubjectCreate(BaseModel):
@@ -65,11 +69,14 @@ class TopicCreate(BaseModel):
     title: str; subject_id: int
 class ScoreUpdate(BaseModel):
     username: str; points: float
+class ProfileUpdate(BaseModel):
+    full_name: str = None; profile_pic: str = None; bio: str = None
 class ChatMessage(BaseModel):
     username: str; message: str; room: str
 
 # --- HYBRID AI ROUTER ---
 def get_ai_response(prompt):
+    # 1. Groq
     if GROQ_KEY:
         try:
             res = requests.post("https://api.groq.com/openai/v1/chat/completions", 
@@ -77,17 +84,27 @@ def get_ai_response(prompt):
                 json={"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": prompt}]}, timeout=15)
             if res.status_code == 200: return res.json()['choices'][0]['message']['content']
         except: pass
+    # 2. Gemini
     if GEMINI_KEY:
         try:
             res = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
                 json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
             if res.status_code == 200: return res.json()["candidates"][0]["content"]["parts"][0]["text"]
         except: pass
-    return "AI services busy."
+    # 3. OpenRouter
+    if OR_KEY:
+        try:
+            res = requests.post("https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
+                json={"model": "meta-llama/llama-3-8b-instruct:free", "messages": [{"role": "user", "content": prompt}]}, timeout=15)
+            if res.status_code == 200: return res.json()['choices'][0]['message']['content']
+        except: pass
+    return "AI services are currently busy."
 
-# --- APP ---
+# --- FASTAPI APP ---
 app = FastAPI(title="Ox-Bridge Learning Hub")
 
+# CORS Setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -101,7 +118,7 @@ def get_db():
     try: yield db
     finally: db.close()
 
-# --- AUTH & ADMIN ---
+# --- AUTH ENDPOINTS ---
 @app.post("/signup")
 def signup(user: UserCreate, db = Depends(get_db)):
     if db.query(User).filter(User.username == user.username).first():
@@ -118,17 +135,26 @@ def login(username: str, password: str, db = Depends(get_db)):
     token = jwt.encode({"sub": user.username, "exp": datetime.now(timezone.utc) + timedelta(minutes=60)}, SECRET_KEY)
     return {"access_token": token, "username": user.username}
 
-@app.post("/admin/add-subject")
-def add_subject(data: SubjectCreate, db = Depends(get_db)):
-    s = Subject(name=data.name, level=data.level)
-    db.add(s); db.commit()
-    return {"id": s.id, "msg": "Subject added"}
+# --- PROFILE & PROGRESS ---
+@app.post("/profile/update")
+def update_profile(username: str, data: ProfileUpdate, db = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    if not user: raise HTTPException(404, "User not found")
+    if data.full_name: user.full_name = data.full_name
+    if data.profile_pic: user.profile_pic = data.profile_pic
+    if data.bio: user.bio = data.bio
+    db.commit()
+    return {"msg": "Profile updated"}
 
-@app.post("/admin/add-topic")
-def add_topic(data: TopicCreate, db = Depends(get_db)):
-    t = Topic(title=data.title, subject_id=data.subject_id)
-    db.add(t); db.commit()
-    return {"id": t.id, "msg": "Topic added"}
+@app.get("/profile/{username}")
+def get_profile(username: str, db = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    if not user: raise HTTPException(404, "User not found")
+    return {
+        "username": user.username, "full_name": user.full_name,
+        "bio": user.bio, "score": user.progress_score,
+        "last_topic": user.last_learned_topic
+    }
 
 @app.post("/progress/add-score")
 def add_score(data: ScoreUpdate, db = Depends(get_db)):
@@ -144,10 +170,28 @@ def get_leaderboard(db = Depends(get_db)):
     top_users = db.query(User).order_by(User.progress_score.desc()).limit(10).all()
     return [{"username": u.username, "score": u.progress_score, "rank": i+1} for i, u in enumerate(top_users)]
 
-# --- AI ENDPOINTS ---
+# --- ADMIN ENDPOINTS ---
+@app.post("/admin/add-subject")
+def add_subject(data: SubjectCreate, db = Depends(get_db)):
+    s = Subject(name=data.name, level=data.level)
+    db.add(s); db.commit()
+    return {"id": s.id, "msg": "Subject added"}
+
+@app.post("/admin/add-topic")
+def add_topic(data: TopicCreate, db = Depends(get_db)):
+    t = Topic(title=data.title, subject_id=data.subject_id)
+    db.add(t); db.commit()
+    return {"id": t.id, "msg": "Topic added"}
+
+# --- AI LEARNING & QUIZ ---
 @app.get("/learn/{topic}")
-def learn(topic: str, level: str = "Secondary", subject: str = "General"):
+def learn(topic: str, username: str, level: str = "Secondary", subject: str = "General", db = Depends(get_db)):
     lesson = get_ai_response(f"Explain '{topic}' to a {level} {subject} student in 150 words.")
+    # Track Progress
+    user = db.query(User).filter(User.username == username).first()
+    if user:
+        user.last_learned_topic = topic
+        db.commit()
     return {"topic": topic, "lesson": lesson}
 
 @app.get("/quiz/{topic}")
@@ -159,7 +203,6 @@ def smart_quiz(topic: str, level: str = "Secondary", subject: str = "General"):
     """
     raw = get_ai_response(prompt)
     try:
-        # Clean up markdown if AI adds it
         clean_raw = raw.replace("```json", "").replace("```", "").strip()
         return {"topic": topic, "quiz": json.loads(clean_raw)}
     except:
@@ -174,9 +217,7 @@ async def websocket_endpoint(websocket: WebSocket, room: str):
     if room not in active_connections:
         active_connections[room] = []
     active_connections[room].append(websocket)
-    
-    # Send welcome message
-    await websocket.send_json({"type": "system", "message": "Connected to Classroom!"})
+    await websocket.send_json({"type": "system", "message": "Connected to Live Classroom!"})
     
     try:
         while True:
@@ -184,11 +225,11 @@ async def websocket_endpoint(websocket: WebSocket, room: str):
             msg = data.get("message")
             user = data.get("username", "Student")
             
-            # Broadcast to everyone in the room
+            # Broadcast Chat
             for connection in active_connections[room]:
                 await connection.send_json({"type": "chat", "username": user, "message": msg})
                 
-            # If user asks AI, get response and send back
+            # AI Tutor Trigger
             if msg.startswith("/ai"):
                 query = msg.replace("/ai", "").strip()
                 response = get_ai_response(query)
@@ -196,4 +237,5 @@ async def websocket_endpoint(websocket: WebSocket, room: str):
                     await connection.send_json({"type": "ai", "username": "Tutor Bot", "message": response})
                     
     except WebSocketDisconnect:
-        active_connections[room].remove(websocket)
+        if websocket in active_connections.get(room, []):
+            active_connections[room].remove(websocket)
