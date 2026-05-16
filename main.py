@@ -3,7 +3,7 @@ import json
 import requests
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Float
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Float, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from pydantic import BaseModel
@@ -59,8 +59,24 @@ class Question(Base):
     option_c = Column(String); option_d = Column(String)
     correct_answer = Column(String)
 
-# FIX: checkfirst=True prevents "Duplicate Table" errors
+# Create tables if they don't exist
 Base.metadata.create_all(bind=engine, checkfirst=True)
+
+# --- AUTO MIGRATE: Add missing columns if they don't exist ---
+def run_migrations():
+    migrations = [
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_pic VARCHAR;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS bio VARCHAR;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS progress_score FLOAT DEFAULT 0.0;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_learned_topic VARCHAR;",
+    ]
+    with engine.connect() as conn:
+        for sql in migrations:
+            conn.execute(text(sql))
+        conn.commit()
+
+run_migrations()
 
 # --- PYDANTIC SCHEMAS ---
 class UserCreate(BaseModel):
@@ -79,7 +95,7 @@ def get_ai_response(prompt):
     # 1. Groq
     if GROQ_KEY:
         try:
-            res = requests.post("https://api.groq.com/openai/v1/chat/completions", 
+            res = requests.post("https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
                 json={"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": prompt}]}, timeout=15)
             if res.status_code == 200: return res.json()['choices'][0]['message']['content']
@@ -107,7 +123,7 @@ app = FastAPI(title="Ox-Bridge Learning Hub")
 # CORS Setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -118,11 +134,13 @@ def get_db():
     try: yield db
     finally: db.close()
 
-# --- AUTH ENDPOINTS (ROBUST) ---
+# --- AUTH ENDPOINTS ---
 @app.post("/signup")
 def signup(user: UserCreate, db = Depends(get_db)):
     if db.query(User).filter(User.username == user.username).first():
         raise HTTPException(400, "Username already taken")
+    if db.query(User).filter(User.email == user.email).first():
+        raise HTTPException(400, "Email already registered")
     hashed_pw = pwd_context.hash(user.password)
     new_user = User(username=user.username, email=user.email, hashed_password=hashed_pw)
     db.add(new_user)
@@ -134,7 +152,10 @@ def login(username: str, password: str, db = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
     if not user or not pwd_context.verify(password, user.hashed_password):
         raise HTTPException(401, "Invalid username or password")
-    token = jwt.encode({"sub": user.username, "exp": datetime.now(timezone.utc) + timedelta(minutes=60)}, SECRET_KEY)
+    token = jwt.encode(
+        {"sub": user.username, "exp": datetime.now(timezone.utc) + timedelta(minutes=60)},
+        SECRET_KEY
+    )
     return {"access_token": token, "username": user.username}
 
 # --- PROFILE & PROGRESS ---
@@ -153,8 +174,10 @@ def get_profile(username: str, db = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
     if not user: raise HTTPException(404, "User not found")
     return {
-        "username": user.username, "full_name": user.full_name,
-        "bio": user.bio, "score": user.progress_score,
+        "username": user.username,
+        "full_name": user.full_name,
+        "bio": user.bio,
+        "score": user.progress_score,
         "last_topic": user.last_learned_topic
     }
 
@@ -246,22 +269,22 @@ async def websocket_endpoint(websocket: WebSocket, room: str):
         active_connections[room] = []
     active_connections[room].append(websocket)
     await websocket.send_json({"type": "system", "message": "Connected to Live Classroom!"})
-    
+
     try:
         while True:
             data = await websocket.receive_json()
             msg = data.get("message")
             user = data.get("username", "Student")
-            
+
             for connection in active_connections[room]:
                 await connection.send_json({"type": "chat", "username": user, "message": msg})
-                
+
             if msg.startswith("/ai"):
                 query = msg.replace("/ai", "").strip()
                 response = get_ai_response(query)
                 for connection in active_connections[room]:
                     await connection.send_json({"type": "ai", "username": "Tutor Bot", "message": response})
-                    
+
     except WebSocketDisconnect:
         if websocket in active_connections.get(room, []):
             active_connections[room].remove(websocket)
