@@ -1,6 +1,7 @@
 import os
+import json
 import requests
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Float
 from sqlalchemy.ext.declarative import declarative_base
@@ -36,7 +37,7 @@ class Subject(Base):
     __tablename__ = "subjects"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String)
-    level = Column(String) # e.g., "WASSCE", "NECO"
+    level = Column(String)
 
 class Topic(Base):
     __tablename__ = "topics"
@@ -62,11 +63,10 @@ class SubjectCreate(BaseModel):
     name: str; level: str
 class TopicCreate(BaseModel):
     title: str; subject_id: int
-class QuestionCreate(BaseModel):
-    topic_id: int; question_text: str; option_a: str; option_b: str
-    option_c: str; option_d: str; correct_answer: str
 class ScoreUpdate(BaseModel):
     username: str; points: float
+class ChatMessage(BaseModel):
+    username: str; message: str; room: str
 
 # --- HYBRID AI ROUTER ---
 def get_ai_response(prompt):
@@ -74,13 +74,13 @@ def get_ai_response(prompt):
         try:
             res = requests.post("https://api.groq.com/openai/v1/chat/completions", 
                 headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
-                json={"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": prompt}]}, timeout=10)
+                json={"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": prompt}]}, timeout=15)
             if res.status_code == 200: return res.json()['choices'][0]['message']['content']
         except: pass
     if GEMINI_KEY:
         try:
             res = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
-                json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=10)
+                json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
             if res.status_code == 200: return res.json()["candidates"][0]["content"]["parts"][0]["text"]
         except: pass
     return "AI services busy."
@@ -101,11 +101,7 @@ def get_db():
     try: yield db
     finally: db.close()
 
-@app.get("/")
-def root():
-    return {"status": "Live", "cors_enabled": True}
-
-# --- AUTH ---
+# --- AUTH & ADMIN ---
 @app.post("/signup")
 def signup(user: UserCreate, db = Depends(get_db)):
     if db.query(User).filter(User.username == user.username).first():
@@ -122,7 +118,6 @@ def login(username: str, password: str, db = Depends(get_db)):
     token = jwt.encode({"sub": user.username, "exp": datetime.now(timezone.utc) + timedelta(minutes=60)}, SECRET_KEY)
     return {"access_token": token, "username": user.username}
 
-# --- ADMIN ENDPOINTS (RESTORED) ---
 @app.post("/admin/add-subject")
 def add_subject(data: SubjectCreate, db = Depends(get_db)):
     s = Subject(name=data.name, level=data.level)
@@ -135,13 +130,6 @@ def add_topic(data: TopicCreate, db = Depends(get_db)):
     db.add(t); db.commit()
     return {"id": t.id, "msg": "Topic added"}
 
-@app.post("/admin/add-question")
-def add_question(data: QuestionCreate, db = Depends(get_db)):
-    q = Question(**data.model_dump())
-    db.add(q); db.commit()
-    return {"msg": "Question saved"}
-
-# --- USER FEATURES ---
 @app.post("/progress/add-score")
 def add_score(data: ScoreUpdate, db = Depends(get_db)):
     user = db.query(User).filter(User.username == data.username).first()
@@ -151,6 +139,12 @@ def add_score(data: ScoreUpdate, db = Depends(get_db)):
         return {"msg": "Score added", "new_total": user.progress_score}
     raise HTTPException(404, "User not found")
 
+@app.get("/leaderboard")
+def get_leaderboard(db = Depends(get_db)):
+    top_users = db.query(User).order_by(User.progress_score.desc()).limit(10).all()
+    return [{"username": u.username, "score": u.progress_score, "rank": i+1} for i, u in enumerate(top_users)]
+
+# --- AI ENDPOINTS ---
 @app.get("/learn/{topic}")
 def learn(topic: str, level: str = "Secondary", subject: str = "General"):
     lesson = get_ai_response(f"Explain '{topic}' to a {level} {subject} student in 150 words.")
@@ -158,6 +152,48 @@ def learn(topic: str, level: str = "Secondary", subject: str = "General"):
 
 @app.get("/quiz/{topic}")
 def smart_quiz(topic: str, level: str = "Secondary", subject: str = "General"):
-    prompt = f"Generate 3 multiple-choice questions about '{topic}' for a {level} student. Return ONLY a JSON list."
+    prompt = f"""
+    Generate 3 multiple-choice questions about '{topic}' for a {level} student.
+    Return ONLY a JSON list like this:
+    [{{"question": "...", "options": ["A) ...", "B) ...", "C) ...", "D) ..."], "answer": "A", "time_limit_sec": 30}}]
+    """
     raw = get_ai_response(prompt)
-    return {"topic": topic, "quiz": raw}
+    try:
+        # Clean up markdown if AI adds it
+        clean_raw = raw.replace("```json", "").replace("```", "").strip()
+        return {"topic": topic, "quiz": json.loads(clean_raw)}
+    except:
+        return {"topic": topic, "quiz": raw, "error": "Parsing failed"}
+
+# --- WEBSOCKET CLASSROOM ---
+active_connections = {}
+
+@app.websocket("/ws/classroom/{room}")
+async def websocket_endpoint(websocket: WebSocket, room: str):
+    await websocket.accept()
+    if room not in active_connections:
+        active_connections[room] = []
+    active_connections[room].append(websocket)
+    
+    # Send welcome message
+    await websocket.send_json({"type": "system", "message": "Connected to Classroom!"})
+    
+    try:
+        while True:
+            data = await websocket.receive_json()
+            msg = data.get("message")
+            user = data.get("username", "Student")
+            
+            # Broadcast to everyone in the room
+            for connection in active_connections[room]:
+                await connection.send_json({"type": "chat", "username": user, "message": msg})
+                
+            # If user asks AI, get response and send back
+            if msg.startswith("/ai"):
+                query = msg.replace("/ai", "").strip()
+                response = get_ai_response(query)
+                for connection in active_connections[room]:
+                    await connection.send_json({"type": "ai", "username": "Tutor Bot", "message": response})
+                    
+    except WebSocketDisconnect:
+        active_connections[room].remove(websocket)
