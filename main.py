@@ -134,6 +134,15 @@ def get_db():
     try: yield db
     finally: db.close()
 
+# --- ROOT ENDPOINT ---
+@app.get("/")
+def root():
+    return {
+        "app": "Ox-Bridge Learning Hub",
+        "status": "running",
+        "message": "Welcome to Ox-Bridge API!"
+    }
+
 # --- AUTH ENDPOINTS ---
 @app.post("/signup")
 def signup(user: UserCreate, db = Depends(get_db)):
