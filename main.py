@@ -1,7 +1,8 @@
 import os
 import requests
 from fastapi import FastAPI, Depends, HTTPException
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
+from fastapi.middleware.cors import CORSMiddleware # 1. Import CORS
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from pydantic import BaseModel
@@ -14,7 +15,6 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 GROQ_KEY = os.getenv("GROQ_KEY")
 GEMINI_KEY = os.getenv("GEMINI_KEY")
 OR_KEY = os.getenv("OPENROUTER_KEY")
-HF_TOKEN = os.getenv("HF_TOKEN")
 SECRET_KEY = os.getenv("SECRET_KEY", "oxbridge_secret")
 
 engine = create_engine(DATABASE_URL)
@@ -29,6 +29,8 @@ class User(Base):
     username = Column(String, unique=True)
     email = Column(String, unique=True)
     hashed_password = Column(String)
+    full_name = Column(String, nullable=True) # Profile Field
+    progress_score = Column(Float, default=0.0) # Tracking Field
 
 class Subject(Base):
     __tablename__ = "subjects"
@@ -47,10 +49,8 @@ class Question(Base):
     id = Column(Integer, primary_key=True, index=True)
     topic_id = Column(Integer, ForeignKey("topics.id"))
     question_text = Column(String)
-    option_a = Column(String)
-    option_b = Column(String)
-    option_c = Column(String)
-    option_d = Column(String)
+    option_a = Column(String); option_b = Column(String)
+    option_c = Column(String); option_d = Column(String)
     correct_answer = Column(String)
 
 Base.metadata.create_all(bind=engine)
@@ -58,17 +58,13 @@ Base.metadata.create_all(bind=engine)
 # --- SCHEMAS ---
 class UserCreate(BaseModel):
     username: str; email: str; password: str
-class SubjectCreate(BaseModel):
-    name: str; level: str
-class TopicCreate(BaseModel):
-    title: str; subject_id: int
-class QuestionCreate(BaseModel):
-    topic_id: int; question_text: str; option_a: str; option_b: str
-    option_c: str; option_d: str; correct_answer: str
+class UserProfile(BaseModel):
+    full_name: str
+class ScoreUpdate(BaseModel):
+    username: str; points: float
 
 # --- HYBRID AI ROUTER ---
 def get_ai_response(prompt):
-    # 1. Groq
     if GROQ_KEY:
         try:
             res = requests.post("https://api.groq.com/openai/v1/chat/completions", 
@@ -76,25 +72,26 @@ def get_ai_response(prompt):
                 json={"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": prompt}]}, timeout=10)
             if res.status_code == 200: return res.json()['choices'][0]['message']['content']
         except: pass
-    # 2. Gemini
     if GEMINI_KEY:
         try:
             res = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
                 json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=10)
             if res.status_code == 200: return res.json()["candidates"][0]["content"]["parts"][0]["text"]
         except: pass
-    # 3. OpenRouter
-    if OR_KEY:
-        try:
-            res = requests.post("https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
-                json={"model": "meta-llama/llama-3-8b-instruct:free", "messages": [{"role": "user", "content": prompt}]}, timeout=10)
-            if res.status_code == 200: return res.json()['choices'][0]['message']['content']
-        except: pass
     return "AI services busy."
 
 # --- APP ---
 app = FastAPI(title="Ox-Bridge Learning Hub")
+
+# 2. ADD CORS (Allow all origins for now)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 def get_db():
     db = SessionLocal()
     try: yield db
@@ -102,7 +99,7 @@ def get_db():
 
 @app.get("/")
 def root():
-    return {"status": "Live", "features": ["Hybrid AI", "Admin Dashboard"]}
+    return {"status": "Live", "cors_enabled": True}
 
 @app.post("/signup")
 def signup(user: UserCreate, db = Depends(get_db)):
@@ -118,25 +115,25 @@ def login(username: str, password: str, db = Depends(get_db)):
     if not user or not pwd_context.verify(password, user.hashed_password):
         raise HTTPException(401, "Invalid credentials")
     token = jwt.encode({"sub": user.username, "exp": datetime.now(timezone.utc) + timedelta(minutes=60)}, SECRET_KEY)
-    return {"access_token": token}
+    return {"access_token": token, "username": user.username}
 
-@app.post("/admin/add-subject")
-def add_subject(data: SubjectCreate, db = Depends(get_db)):
-    s = Subject(name=data.name, level=data.level)
-    db.add(s); db.commit()
-    return {"id": s.id, "msg": "Subject added"}
+@app.post("/profile/update")
+def update_profile(data: UserProfile, username: str, db = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    if user:
+        user.full_name = data.full_name
+        db.commit()
+        return {"msg": "Profile updated"}
+    raise HTTPException(404, "User not found")
 
-@app.post("/admin/add-topic")
-def add_topic(data: TopicCreate, db = Depends(get_db)):
-    t = Topic(title=data.title, subject_id=data.subject_id)
-    db.add(t); db.commit()
-    return {"id": t.id, "msg": "Topic added"}
-
-@app.post("/admin/add-question")
-def add_question(data: QuestionCreate, db = Depends(get_db)):
-    q = Question(**data.model_dump())
-    db.add(q); db.commit()
-    return {"msg": "Question saved"}
+@app.post("/progress/add-score")
+def add_score(data: ScoreUpdate, db = Depends(get_db)):
+    user = db.query(User).filter(User.username == data.username).first()
+    if user:
+        user.progress_score += data.points
+        db.commit()
+        return {"msg": "Score added", "new_total": user.progress_score}
+    raise HTTPException(404, "User not found")
 
 @app.get("/learn/{topic}")
 def learn(topic: str, level: str = "Secondary", subject: str = "General"):
