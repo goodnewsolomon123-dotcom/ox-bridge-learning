@@ -16,6 +16,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 GROQ_KEY = os.getenv("GROQ_KEY")
 GEMINI_KEY = os.getenv("GEMINI_KEY")
 OR_KEY = os.getenv("OPENROUTER_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY", "oxbridge_secret")
 
 # Database Setup
@@ -58,7 +59,8 @@ class Question(Base):
     option_c = Column(String); option_d = Column(String)
     correct_answer = Column(String)
 
-Base.metadata.create_all(bind=engine)
+# FIX: checkfirst=True prevents "Duplicate Table" errors
+Base.metadata.create_all(bind=engine, checkfirst=True)
 
 # --- PYDANTIC SCHEMAS ---
 class UserCreate(BaseModel):
@@ -71,8 +73,6 @@ class ScoreUpdate(BaseModel):
     username: str; points: float
 class ProfileUpdate(BaseModel):
     full_name: str = None; profile_pic: str = None; bio: str = None
-class ChatMessage(BaseModel):
-    username: str; message: str; room: str
 
 # --- HYBRID AI ROUTER ---
 def get_ai_response(prompt):
@@ -118,20 +118,22 @@ def get_db():
     try: yield db
     finally: db.close()
 
-# --- AUTH ENDPOINTS ---
+# --- AUTH ENDPOINTS (ROBUST) ---
 @app.post("/signup")
 def signup(user: UserCreate, db = Depends(get_db)):
     if db.query(User).filter(User.username == user.username).first():
-        raise HTTPException(400, "Username taken")
-    db.add(User(username=user.username, email=user.email, hashed_password=pwd_context.hash(user.password)))
+        raise HTTPException(400, "Username already taken")
+    hashed_pw = pwd_context.hash(user.password)
+    new_user = User(username=user.username, email=user.email, hashed_password=hashed_pw)
+    db.add(new_user)
     db.commit()
-    return {"msg": "User created"}
+    return {"msg": "User created successfully! Please login."}
 
 @app.post("/login")
 def login(username: str, password: str, db = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
     if not user or not pwd_context.verify(password, user.hashed_password):
-        raise HTTPException(401, "Invalid credentials")
+        raise HTTPException(401, "Invalid username or password")
     token = jwt.encode({"sub": user.username, "exp": datetime.now(timezone.utc) + timedelta(minutes=60)}, SECRET_KEY)
     return {"access_token": token, "username": user.username}
 
@@ -187,7 +189,6 @@ def add_topic(data: TopicCreate, db = Depends(get_db)):
 @app.get("/learn/{topic}")
 def learn(topic: str, username: str, level: str = "Secondary", subject: str = "General", db = Depends(get_db)):
     lesson = get_ai_response(f"Explain '{topic}' to a {level} {subject} student in 150 words.")
-    # Track Progress
     user = db.query(User).filter(User.username == username).first()
     if user:
         user.last_learned_topic = topic
@@ -208,6 +209,33 @@ def smart_quiz(topic: str, level: str = "Secondary", subject: str = "General"):
     except:
         return {"topic": topic, "quiz": raw, "error": "Parsing failed"}
 
+# --- TAVILY SEARCH ---
+@app.get("/search/web/{query}")
+def search_web(query: str):
+    if not TAVILY_API_KEY:
+        return {"error": "Tavily API Key missing"}
+    url = "https://api.tavily.com/search"
+    payload = {
+        "api_key": TAVILY_API_KEY,
+        "query": query + " education tutorial",
+        "search_depth": "basic",
+        "max_results": 5
+    }
+    try:
+        res = requests.post(url, json=payload, timeout=10)
+        if res.status_code == 200:
+            results = []
+            for item in res.json()["results"]:
+                results.append({
+                    "title": item["title"],
+                    "url": item["url"],
+                    "snippet": item["content"][:150] + "..."
+                })
+            return {"query": query, "results": results}
+    except Exception as e:
+        return {"error": f"Search failed: {str(e)}"}
+    return {"error": "No results found"}
+
 # --- WEBSOCKET CLASSROOM ---
 active_connections = {}
 
@@ -225,11 +253,9 @@ async def websocket_endpoint(websocket: WebSocket, room: str):
             msg = data.get("message")
             user = data.get("username", "Student")
             
-            # Broadcast Chat
             for connection in active_connections[room]:
                 await connection.send_json({"type": "chat", "username": user, "message": msg})
                 
-            # AI Tutor Trigger
             if msg.startswith("/ai"):
                 query = msg.replace("/ai", "").strip()
                 response = get_ai_response(query)
