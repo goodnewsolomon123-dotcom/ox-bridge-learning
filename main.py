@@ -1,7 +1,7 @@
 import os
 import requests
 from fastapi import FastAPI, Depends, HTTPException
-from fastapi.middleware.cors import CORSMiddleware # 1. Import CORS
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -29,14 +29,14 @@ class User(Base):
     username = Column(String, unique=True)
     email = Column(String, unique=True)
     hashed_password = Column(String)
-    full_name = Column(String, nullable=True) # Profile Field
-    progress_score = Column(Float, default=0.0) # Tracking Field
+    full_name = Column(String, nullable=True)
+    progress_score = Column(Float, default=0.0)
 
 class Subject(Base):
     __tablename__ = "subjects"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String)
-    level = Column(String)
+    level = Column(String) # e.g., "WASSCE", "NECO"
 
 class Topic(Base):
     __tablename__ = "topics"
@@ -58,8 +58,13 @@ Base.metadata.create_all(bind=engine)
 # --- SCHEMAS ---
 class UserCreate(BaseModel):
     username: str; email: str; password: str
-class UserProfile(BaseModel):
-    full_name: str
+class SubjectCreate(BaseModel):
+    name: str; level: str
+class TopicCreate(BaseModel):
+    title: str; subject_id: int
+class QuestionCreate(BaseModel):
+    topic_id: int; question_text: str; option_a: str; option_b: str
+    option_c: str; option_d: str; correct_answer: str
 class ScoreUpdate(BaseModel):
     username: str; points: float
 
@@ -83,7 +88,6 @@ def get_ai_response(prompt):
 # --- APP ---
 app = FastAPI(title="Ox-Bridge Learning Hub")
 
-# 2. ADD CORS (Allow all origins for now)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -101,6 +105,7 @@ def get_db():
 def root():
     return {"status": "Live", "cors_enabled": True}
 
+# --- AUTH ---
 @app.post("/signup")
 def signup(user: UserCreate, db = Depends(get_db)):
     if db.query(User).filter(User.username == user.username).first():
@@ -117,15 +122,26 @@ def login(username: str, password: str, db = Depends(get_db)):
     token = jwt.encode({"sub": user.username, "exp": datetime.now(timezone.utc) + timedelta(minutes=60)}, SECRET_KEY)
     return {"access_token": token, "username": user.username}
 
-@app.post("/profile/update")
-def update_profile(data: UserProfile, username: str, db = Depends(get_db)):
-    user = db.query(User).filter(User.username == username).first()
-    if user:
-        user.full_name = data.full_name
-        db.commit()
-        return {"msg": "Profile updated"}
-    raise HTTPException(404, "User not found")
+# --- ADMIN ENDPOINTS (RESTORED) ---
+@app.post("/admin/add-subject")
+def add_subject(data: SubjectCreate, db = Depends(get_db)):
+    s = Subject(name=data.name, level=data.level)
+    db.add(s); db.commit()
+    return {"id": s.id, "msg": "Subject added"}
 
+@app.post("/admin/add-topic")
+def add_topic(data: TopicCreate, db = Depends(get_db)):
+    t = Topic(title=data.title, subject_id=data.subject_id)
+    db.add(t); db.commit()
+    return {"id": t.id, "msg": "Topic added"}
+
+@app.post("/admin/add-question")
+def add_question(data: QuestionCreate, db = Depends(get_db)):
+    q = Question(**data.model_dump())
+    db.add(q); db.commit()
+    return {"msg": "Question saved"}
+
+# --- USER FEATURES ---
 @app.post("/progress/add-score")
 def add_score(data: ScoreUpdate, db = Depends(get_db)):
     user = db.query(User).filter(User.username == data.username).first()
