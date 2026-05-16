@@ -1,39 +1,150 @@
-
 import os
-from fastapi import FastAPI
 import requests
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from pydantic import BaseModel
+from passlib.context import CryptContext
+import jwt
+from datetime import datetime, timedelta, timezone
 
 # --- CONFIG ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 GROQ_KEY = os.getenv("GROQ_KEY")
+GEMINI_KEY = os.getenv("GEMINI_KEY")
+OR_KEY = os.getenv("OPENROUTER_KEY")
+HF_TOKEN = os.getenv("HF_TOKEN")
+SECRET_KEY = os.getenv("SECRET_KEY", "oxbridge_secret")
 
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# --- MODELS ---
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True)
+    email = Column(String, unique=True)
+    hashed_password = Column(String)
+
+class Subject(Base):
+    __tablename__ = "subjects"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String)
+    level = Column(String)
+
+class Topic(Base):
+    __tablename__ = "topics"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String)
+    subject_id = Column(Integer, ForeignKey("subjects.id"))
+
+class Question(Base):
+    __tablename__ = "questions"
+    id = Column(Integer, primary_key=True, index=True)
+    topic_id = Column(Integer, ForeignKey("topics.id"))
+    question_text = Column(String)
+    option_a = Column(String)
+    option_b = Column(String)
+    option_c = Column(String)
+    option_d = Column(String)
+    correct_answer = Column(String)
+
+Base.metadata.create_all(bind=engine)
+
+# --- SCHEMAS ---
+class UserCreate(BaseModel):
+    username: str; email: str; password: str
+class SubjectCreate(BaseModel):
+    name: str; level: str
+class TopicCreate(BaseModel):
+    title: str; subject_id: int
+class QuestionCreate(BaseModel):
+    topic_id: int; question_text: str; option_a: str; option_b: str
+    option_c: str; option_d: str; correct_answer: str
+
+# --- HYBRID AI ROUTER ---
+def get_ai_response(prompt):
+    # 1. Groq
+    if GROQ_KEY:
+        try:
+            res = requests.post("https://api.groq.com/openai/v1/chat/completions", 
+                headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+                json={"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": prompt}]}, timeout=10)
+            if res.status_code == 200: return res.json()['choices'][0]['message']['content']
+        except: pass
+    # 2. Gemini
+    if GEMINI_KEY:
+        try:
+            res = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
+                json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=10)
+            if res.status_code == 200: return res.json()["candidates"][0]["content"]["parts"][0]["text"]
+        except: pass
+    # 3. OpenRouter
+    if OR_KEY:
+        try:
+            res = requests.post("https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
+                json={"model": "meta-llama/llama-3-8b-instruct:free", "messages": [{"role": "user", "content": prompt}]}, timeout=10)
+            if res.status_code == 200: return res.json()['choices'][0]['message']['content']
+        except: pass
+    return "AI services busy."
+
+# --- APP ---
 app = FastAPI(title="Ox-Bridge Learning Hub")
+def get_db():
+    db = SessionLocal()
+    try: yield db
+    finally: db.close()
 
 @app.get("/")
-def read_root():
-    # This endpoint helps us debug if the server is running
-    return {
-        "status": "Running", 
-        "db_connected": "Yes" if DATABASE_URL else "No (Missing Env Var)",
-        "groq_key_present": "Yes" if GROQ_KEY else "No (Missing Env Var)"
-    }
+def root():
+    return {"status": "Live", "features": ["Hybrid AI", "Admin Dashboard"]}
+
+@app.post("/signup")
+def signup(user: UserCreate, db = Depends(get_db)):
+    if db.query(User).filter(User.username == user.username).first():
+        raise HTTPException(400, "Username taken")
+    db.add(User(username=user.username, email=user.email, hashed_password=pwd_context.hash(user.password)))
+    db.commit()
+    return {"msg": "User created"}
+
+@app.post("/login")
+def login(username: str, password: str, db = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    if not user or not pwd_context.verify(password, user.hashed_password):
+        raise HTTPException(401, "Invalid credentials")
+    token = jwt.encode({"sub": user.username, "exp": datetime.now(timezone.utc) + timedelta(minutes=60)}, SECRET_KEY)
+    return {"access_token": token}
+
+@app.post("/admin/add-subject")
+def add_subject(data: SubjectCreate, db = Depends(get_db)):
+    s = Subject(name=data.name, level=data.level)
+    db.add(s); db.commit()
+    return {"id": s.id, "msg": "Subject added"}
+
+@app.post("/admin/add-topic")
+def add_topic(data: TopicCreate, db = Depends(get_db)):
+    t = Topic(title=data.title, subject_id=data.subject_id)
+    db.add(t); db.commit()
+    return {"id": t.id, "msg": "Topic added"}
+
+@app.post("/admin/add-question")
+def add_question(data: QuestionCreate, db = Depends(get_db)):
+    q = Question(**data.model_dump())
+    db.add(q); db.commit()
+    return {"msg": "Question saved"}
 
 @app.get("/learn/{topic}")
-def learn(topic: str):
-    if not GROQ_KEY:
-        return {"error": "Groq Key is missing in Render Environment Variables"}
-        
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": "llama-3.1-8b-instant", 
-        "messages": [{"role": "user", "content": f"Explain {topic} simply."}]
-    }
-    try:
-        res = requests.post(url, headers=headers, json=payload, timeout=10)
-        if res.status_code == 200:
-            return {"topic": topic, "lesson": res.json()['choices'][0]['message']['content']}
-        else:
-            return {"error": f"Groq API Error: {res.status_code}", "details": res.text}
-    except Exception as e:
-        return {"error": str(e)}
+def learn(topic: str, level: str = "Secondary", subject: str = "General"):
+    lesson = get_ai_response(f"Explain '{topic}' to a {level} {subject} student in 150 words.")
+    return {"topic": topic, "lesson": lesson}
+
+@app.get("/quiz/{topic}")
+def smart_quiz(topic: str, level: str = "Secondary", subject: str = "General"):
+    prompt = f"Generate 3 multiple-choice questions about '{topic}' for a {level} student. Return ONLY a JSON list."
+    raw = get_ai_response(prompt)
+    return {"topic": topic, "quiz": raw}
