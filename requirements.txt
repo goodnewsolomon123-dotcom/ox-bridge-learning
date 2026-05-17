@@ -8,3 +8,4 @@ passlib==1.7.4
 bcrypt==3.2.2
 PyJWT==2.9.0
 requests==2.32.3
+python-multipart==0.0.9
