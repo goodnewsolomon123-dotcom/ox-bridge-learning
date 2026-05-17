@@ -3,7 +3,7 @@ import json
 import random
 import hashlib
 import requests
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Float, Boolean, text
 from sqlalchemy.ext.declarative import declarative_base
@@ -17,7 +17,7 @@ from typing import Optional, List
 # ============================================================
 # CONFIGURATION
 # ============================================================
-DATABASE_URL       = os.getenv("DATABASE_URL")
+DATABASE_URL       = os.getenv("DATABASE_URL", "postgresql://neondb_owner:npg_UElyr9BSK5OH@ep-bold-hall-aq15g941-pooler.c-8.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require")
 GROQ_KEY           = os.getenv("GROQ_KEY")
 GEMINI_KEY         = os.getenv("GEMINI_KEY")
 OR_KEY             = os.getenv("OPENROUTER_KEY")
@@ -26,13 +26,34 @@ TAVILY_KEY         = os.getenv("TAVILY_API_KEY")
 SECRET_KEY         = os.getenv("SECRET_KEY", "oxbridge_secret_2025")
 TOKEN_EXPIRE_HOURS = 72
 
-engine       = create_engine(DATABASE_URL)
+# ============================================================
+# DATABASE ENGINE — FIXED FOR NEON
+# pool_pre_ping   = auto-reconnect if Neon was sleeping
+# pool_recycle    = refresh connections every 5 mins
+# connect_timeout = don't hang forever on connection
+# ============================================================
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping   = True,
+    pool_recycle    = 300,
+    pool_size       = 5,
+    max_overflow    = 10,
+    connect_args    = {
+        "connect_timeout": 10,
+        "sslmode":         "require",
+        "keepalives":      1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+    }
+)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base         = declarative_base()
 pwd_context  = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
 
 # ============================================================
-# AI RESPONSE CACHE
+# AI RESPONSE CACHE — saves API calls
 # ============================================================
 ai_cache: dict = {}
 
@@ -42,7 +63,7 @@ def make_cache_key(prompt: str) -> str:
 def get_cached(prompt: str) -> Optional[str]:
     key = make_cache_key(prompt)
     if key in ai_cache:
-        print(f"[CACHE HIT] {key[:8]}...")
+        print(f"[CACHE HIT] {key[:8]}")
         return ai_cache[key]
     return None
 
@@ -55,7 +76,6 @@ def set_cache(prompt: str, response: str):
 # ============================================================
 # DATABASE MODELS
 # ============================================================
-
 class User(Base):
     __tablename__ = "users"
     id                 = Column(Integer, primary_key=True, index=True)
@@ -83,26 +103,21 @@ class Topic(Base):
     title      = Column(String)
     subject_id = Column(Integer, ForeignKey("subjects.id"))
 
-# ============================================================
-# MANUAL QUESTION MODEL
-# Standalone — no topic_id needed.
-# Add directly via /admin/add-question or Neon dashboard.
-# ============================================================
 class ManualQuestion(Base):
     __tablename__ = "manual_questions"
     id             = Column(Integer, primary_key=True, index=True)
-    subject        = Column(String,  index=True)   # e.g. "Mathematics"
-    level          = Column(String,  index=True)   # e.g. "WAEC", "SSS", "JAMB"
-    topic          = Column(String,  nullable=True) # e.g. "Algebra"
+    subject        = Column(String,  index=True)
+    level          = Column(String,  index=True)
+    topic          = Column(String,  nullable=True)
     question_text  = Column(String)
     option_a       = Column(String)
     option_b       = Column(String)
     option_c       = Column(String)
     option_d       = Column(String)
-    correct_answer = Column(String)               # "A", "B", "C", or "D"
+    correct_answer = Column(String)
     explanation    = Column(String,  nullable=True)
-    source         = Column(String,  nullable=True) # "manual", "WAEC 2022", etc.
-    added_by       = Column(String,  nullable=True) # admin username
+    source         = Column(String,  nullable=True)
+    added_by       = Column(String,  nullable=True)
     created_at     = Column(String,  nullable=True)
 
 class Badge(Base):
@@ -196,14 +211,26 @@ class GameScore(Base):
     score     = Column(Integer)
     played_at = Column(String)
 
+# NEW: AI Chat History
+class AIChatHistory(Base):
+    __tablename__ = "ai_chat_history"
+    id         = Column(Integer, primary_key=True, index=True)
+    user_id    = Column(Integer, ForeignKey("users.id"))
+    role       = Column(String)   # "user" or "assistant"
+    message    = Column(String)
+    created_at = Column(String)
+
 # ============================================================
 # CREATE TABLES + MIGRATIONS
 # ============================================================
-Base.metadata.create_all(bind=engine, checkfirst=True)
+try:
+    Base.metadata.create_all(bind=engine, checkfirst=True)
+    print("[DB] Tables created/verified successfully")
+except Exception as e:
+    print(f"[DB ERROR] Could not create tables: {e}")
 
 def run_migrations():
     migrations = [
-        # users
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR;",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_pic VARCHAR;",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS bio VARCHAR;",
@@ -212,26 +239,29 @@ def run_migrations():
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS study_streak INTEGER DEFAULT 0;",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_study_date VARCHAR;",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS coins INTEGER DEFAULT 0;",
-        # manual_questions (new table columns safety)
         "ALTER TABLE manual_questions ADD COLUMN IF NOT EXISTS source VARCHAR;",
         "ALTER TABLE manual_questions ADD COLUMN IF NOT EXISTS added_by VARCHAR;",
         "ALTER TABLE manual_questions ADD COLUMN IF NOT EXISTS created_at VARCHAR;",
         "ALTER TABLE manual_questions ADD COLUMN IF NOT EXISTS explanation VARCHAR;",
         "ALTER TABLE manual_questions ADD COLUMN IF NOT EXISTS topic VARCHAR;",
     ]
-    with engine.connect() as conn:
-        for sql in migrations:
-            try:
-                conn.execute(text(sql))
-            except Exception as e:
-                print(f"[MIGRATION] Skipped: {e}")
-        conn.commit()
+    try:
+        with engine.connect() as conn:
+            for sql in migrations:
+                try:
+                    conn.execute(text(sql))
+                except Exception as e:
+                    print(f"[MIGRATION] Skipped: {e}")
+            conn.commit()
+        print("[DB] Migrations complete")
+    except Exception as e:
+        print(f"[DB MIGRATION ERROR] {e}")
 
 run_migrations()
 
 def seed_badges():
-    db = SessionLocal()
     try:
+        db = SessionLocal()
         if db.query(Badge).count() == 0:
             db.add_all([
                 Badge(name="First Step",    icon="👣", description="Created your account",      points_required=0),
@@ -244,8 +274,10 @@ def seed_badges():
                 Badge(name="Speed Learner", icon="⚡", description="Completed 10 quizzes",      points_required=0),
             ])
             db.commit()
-    finally:
+            print("[DB] Default badges seeded")
         db.close()
+    except Exception as e:
+        print(f"[SEED ERROR] {e}")
 
 seed_badges()
 
@@ -255,7 +287,8 @@ seed_badges()
 def now_str():   return datetime.now(timezone.utc).isoformat()
 def today_str(): return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-def hash_password(pw: str) -> str:   return pwd_context.hash(pw)
+def hash_password(pw: str) -> str: return pwd_context.hash(pw)
+
 def verify_password(plain: str, hashed: str) -> bool:
     try:    return pwd_context.verify(plain, hashed)
     except: return False
@@ -269,32 +302,35 @@ def decode_token(token: str) -> Optional[str]:
     except: return None
 
 def check_and_award_badges(user_id: int, db):
-    user       = db.query(User).filter(User.id == user_id).first()
-    if not user: return []
-    earned_ids = {ub.badge_id for ub in db.query(UserBadge).filter(UserBadge.user_id == user_id).all()}
-    all_badges = db.query(Badge).all()
-    quiz_count = db.query(QuizResult).filter(QuizResult.user_id == user_id).count()
-    newly = []
-    for b in all_badges:
-        if b.id in earned_ids: continue
-        award = False
-        if b.name == "Rising Star"   and (user.progress_score or 0) >= 10:  award = True
-        if b.name == "Scholar"       and (user.progress_score or 0) >= 50:  award = True
-        if b.name == "Champion"      and (user.progress_score or 0) >= 100: award = True
-        if b.name == "Legend"        and (user.progress_score or 0) >= 500: award = True
-        if b.name == "Streak Master" and (user.study_streak   or 0) >= 7:   award = True
-        if b.name == "Speed Learner" and quiz_count >= 10:                   award = True
-        if award:
-            db.add(UserBadge(user_id=user_id, badge_id=b.id, earned_at=now_str()))
-            db.add(Notification(user_id=user_id, message=f"🏅 You earned the '{b.name}' badge!", created_at=now_str()))
-            newly.append(b.name)
-    if newly: db.commit()
-    return newly
+    try:
+        user       = db.query(User).filter(User.id == user_id).first()
+        if not user: return []
+        earned_ids = {ub.badge_id for ub in db.query(UserBadge).filter(UserBadge.user_id == user_id).all()}
+        quiz_count = db.query(QuizResult).filter(QuizResult.user_id == user_id).count()
+        newly = []
+        for b in db.query(Badge).all():
+            if b.id in earned_ids: continue
+            award = False
+            if b.name == "Rising Star"   and (user.progress_score or 0) >= 10:  award = True
+            if b.name == "Scholar"       and (user.progress_score or 0) >= 50:  award = True
+            if b.name == "Champion"      and (user.progress_score or 0) >= 100: award = True
+            if b.name == "Legend"        and (user.progress_score or 0) >= 500: award = True
+            if b.name == "Streak Master" and (user.study_streak   or 0) >= 7:   award = True
+            if b.name == "Speed Learner" and quiz_count >= 10:                   award = True
+            if award:
+                db.add(UserBadge(user_id=user_id, badge_id=b.id, earned_at=now_str()))
+                db.add(Notification(user_id=user_id, message=f"🏅 You earned the '{b.name}' badge!", created_at=now_str()))
+                newly.append(b.name)
+        if newly: db.commit()
+        return newly
+    except Exception as e:
+        print(f"[BADGE ERROR] {e}")
+        return []
 
 def update_streak(user: User, db):
     today = today_str()
     if user.last_study_date == today: return
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday            = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     user.study_streak    = ((user.study_streak or 0) + 1) if user.last_study_date == yesterday else 1
     user.last_study_date = today
     db.commit()
@@ -309,7 +345,7 @@ def get_ai_response(prompt: str) -> str:
 
     result = None
 
-    # 1. Groq (fastest)
+    # 1. Groq
     if GROQ_KEY and not result:
         try:
             res = requests.post(
@@ -350,7 +386,7 @@ def get_ai_response(prompt: str) -> str:
                 print("[AI] OpenRouter ✓")
         except Exception as e: print(f"[AI] OpenRouter ✗: {e}")
 
-    # 4. HuggingFace (fallback)
+    # 4. HuggingFace
     if HF_KEY and not result:
         try:
             res = requests.post(
@@ -400,22 +436,14 @@ class UserCreate(BaseModel):
     email:    str
     password: str
 
-class SubjectCreate(BaseModel):
-    name:  str
-    level: str
-
-class TopicCreate(BaseModel):
-    title:      str
-    subject_id: int
-
-class ScoreUpdate(BaseModel):
-    username: str
-    points:   float
-
 class ProfileUpdate(BaseModel):
     full_name:   Optional[str] = None
     profile_pic: Optional[str] = None
     bio:         Optional[str] = None
+
+class ScoreUpdate(BaseModel):
+    username: str
+    points:   float
 
 class QuizResultCreate(BaseModel):
     username:        str
@@ -434,7 +462,7 @@ class ManualQuestionCreate(BaseModel):
     option_b:       str
     option_c:       str
     option_d:       str
-    correct_answer: str           # "A", "B", "C", or "D"
+    correct_answer: str
     explanation:    Optional[str] = None
     source:         Optional[str] = "manual"
     added_by:       Optional[str] = "admin"
@@ -489,19 +517,36 @@ class GameScoreSave(BaseModel):
 class TokenValidate(BaseModel):
     token: str
 
+class SubjectCreate(BaseModel):
+    name:  str
+    level: str
+
+class TopicCreate(BaseModel):
+    title:      str
+    subject_id: int
+
+# NEW: AI Chat schemas
+class AIChatMessage(BaseModel):
+    username: str
+    message:  str
+    subject:  Optional[str] = "General"
+    level:    Optional[str] = "SSS"
+
+class AIChatHistoryClear(BaseModel):
+    username: str
+
 # ============================================================
-# ROOT — FIXED: supports HEAD for UptimeRobot
+# ROOT — supports HEAD for UptimeRobot
 # ============================================================
 @app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {
-        "app":           "Ox-Bridge Learning Hub",
-        "version":       "2.0.0",
-        "status":        "running",
-        "message":       "Powered by Ox-Bridge Technology 🇳🇬",
-        "ai_providers":  ["Groq", "Gemini", "OpenRouter", "HuggingFace"],
-        "cache_size":    len(ai_cache),
-        "manual_q_info": "Add questions via POST /admin/add-question or Neon dashboard"
+        "app":          "Ox-Bridge Learning Hub",
+        "version":      "2.0.0",
+        "status":       "running ✅",
+        "powered_by":   "Ox-Bridge Technology",
+        "ai_providers": ["Groq", "Gemini", "OpenRouter", "HuggingFace"],
+        "cache_size":   len(ai_cache)
     }
 
 # ============================================================
@@ -530,7 +575,6 @@ def signup(user: UserCreate, db=Depends(get_db)):
     )
     db.add(new_user); db.commit(); db.refresh(new_user)
 
-    # First Step badge
     fs = db.query(Badge).filter(Badge.name == "First Step").first()
     if fs:
         db.add(UserBadge(user_id=new_user.id, badge_id=fs.id, earned_at=now_str()))
@@ -550,12 +594,11 @@ def login(username: str, password: str, db=Depends(get_db)):
 
     user = db.query(User).filter(User.username.ilike(username)).first()
     if not user:
-        print(f"[LOGIN] User not found: '{username}'")
+        print(f"[LOGIN] Not found: '{username}'")
         raise HTTPException(401, "No account found with that username. Please sign up first.")
 
     ok = verify_password(password, user.hashed_password)
-    print(f"[LOGIN] '{username}' — password match: {ok}")
-
+    print(f"[LOGIN] '{username}' — match: {ok}")
     if not ok:
         raise HTTPException(401, "Wrong password. Please try again.")
 
@@ -574,7 +617,7 @@ def login(username: str, password: str, db=Depends(get_db)):
 def validate_token(data: TokenValidate, db=Depends(get_db)):
     username = decode_token(data.token)
     if not username:
-        raise HTTPException(401, "Token expired or invalid. Please login again.")
+        raise HTTPException(401, "Token expired. Please login again.")
     user = db.query(User).filter(User.username == username).first()
     if not user:
         raise HTTPException(401, "User not found. Please login again.")
@@ -593,20 +636,19 @@ def validate_token(data: TokenValidate, db=Depends(get_db)):
 def get_profile(username: str, db=Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
     if not user: raise HTTPException(404, "User not found")
-    badges     = db.query(UserBadge).filter(UserBadge.user_id == user.id).all()
-    badge_list = []
-    for ub in badges:
+    badges = []
+    for ub in db.query(UserBadge).filter(UserBadge.user_id == user.id).all():
         b = db.query(Badge).filter(Badge.id == ub.badge_id).first()
-        if b: badge_list.append({"name": b.name, "icon": b.icon, "earned_at": ub.earned_at})
+        if b: badges.append({"name": b.name, "icon": b.icon, "earned_at": ub.earned_at})
     return {
-        "username":    user.username, "full_name":   user.full_name,
-        "bio":         user.bio,      "profile_pic": user.profile_pic,
+        "username":    user.username,   "full_name":   user.full_name,
+        "bio":         user.bio,         "profile_pic": user.profile_pic,
         "score":       user.progress_score or 0,
         "streak":      user.study_streak   or 0,
         "coins":       user.coins          or 0,
         "last_topic":  user.last_learned_topic,
         "quiz_count":  db.query(QuizResult).filter(QuizResult.user_id == user.id).count(),
-        "badges":      badge_list
+        "badges":      badges
     }
 
 @app.post("/profile/update")
@@ -632,121 +674,157 @@ def add_score(data: ScoreUpdate, db=Depends(get_db)):
 @app.get("/leaderboard")
 def get_leaderboard(db=Depends(get_db)):
     top = db.query(User).order_by(User.progress_score.desc()).limit(10).all()
-    return [{"rank": i+1, "username": u.username, "score": u.progress_score or 0, "streak": u.study_streak or 0, "coins": u.coins or 0} for i, u in enumerate(top)]
+    return [{"rank": i+1, "username": u.username, "score": u.progress_score or 0,
+             "streak": u.study_streak or 0, "coins": u.coins or 0} for i, u in enumerate(top)]
 
 # ============================================================
 # BADGES
 # ============================================================
 @app.get("/badges/all")
 def get_all_badges(db=Depends(get_db)):
-    return [{"id": b.id, "name": b.name, "icon": b.icon, "description": b.description, "points_required": b.points_required} for b in db.query(Badge).all()]
+    return [{"id": b.id, "name": b.name, "icon": b.icon,
+             "description": b.description, "points_required": b.points_required}
+            for b in db.query(Badge).all()]
 
 @app.get("/badges/{username}")
 def get_user_badges(username: str, db=Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
     if not user: raise HTTPException(404, "User not found")
-    rows = db.query(UserBadge).filter(UserBadge.user_id == user.id).all()
     result = []
-    for ub in rows:
+    for ub in db.query(UserBadge).filter(UserBadge.user_id == user.id).all():
         b = db.query(Badge).filter(Badge.id == ub.badge_id).first()
         if b: result.append({"name": b.name, "icon": b.icon, "description": b.description, "earned_at": ub.earned_at})
     return result
 
 # ============================================================
-# MANUAL QUESTIONS — ADMIN MANAGEMENT
-# No need to touch app.py again — use these endpoints!
+# AI CHAT SPACE — NEW FEATURE
+# Users can chat freely with the AI tutor and history is saved
 # ============================================================
+@app.post("/ai/chat")
+def ai_chat(data: AIChatMessage, db=Depends(get_db)):
+    """
+    Dedicated AI chat endpoint.
+    Keeps conversation context so AI remembers previous messages in session.
+    """
+    user = db.query(User).filter(User.username == data.username).first()
+    if not user: raise HTTPException(404, "User not found")
 
+    # Get last 6 messages for context (3 exchanges)
+    history = db.query(AIChatHistory).filter(
+        AIChatHistory.user_id == user.id
+    ).order_by(AIChatHistory.id.desc()).limit(6).all()
+    history.reverse()
+
+    # Build context string
+    context = ""
+    for h in history:
+        role  = "Student" if h.role == "user" else "Tutor"
+        context += f"{role}: {h.message}\n"
+
+    prompt = f"""You are Ox-Bridge AI Tutor — a friendly, knowledgeable tutor for Nigerian students 
+    ({data.level} level, {data.subject} subject).
+    
+    You explain things simply, use Nigerian examples where helpful, and encourage students.
+    You are built by Ox-Bridge Technology.
+    
+    Previous conversation:
+    {context}
+    
+    Student: {data.message}
+    
+    Tutor:"""
+
+    response = get_ai_response(prompt)
+
+    # Save to chat history
+    db.add(AIChatHistory(user_id=user.id, role="user",      message=data.message,  created_at=now_str()))
+    db.add(AIChatHistory(user_id=user.id, role="assistant", message=response,       created_at=now_str()))
+    db.commit()
+
+    return {
+        "response":  response,
+        "username":  data.username,
+        "subject":   data.subject,
+        "level":     data.level,
+        "timestamp": now_str()
+    }
+
+@app.get("/ai/chat/history/{username}")
+def get_chat_history(username: str, limit: int = 20, db=Depends(get_db)):
+    """Get user's AI chat history."""
+    user = db.query(User).filter(User.username == username).first()
+    if not user: raise HTTPException(404, "User not found")
+    history = db.query(AIChatHistory).filter(
+        AIChatHistory.user_id == user.id
+    ).order_by(AIChatHistory.id.desc()).limit(limit).all()
+    history.reverse()
+    return [{"role": h.role, "message": h.message, "created_at": h.created_at} for h in history]
+
+@app.post("/ai/chat/clear")
+def clear_chat_history(data: AIChatHistoryClear, db=Depends(get_db)):
+    """Clear user's AI chat history."""
+    user = db.query(User).filter(User.username == data.username).first()
+    if not user: raise HTTPException(404, "User not found")
+    db.query(AIChatHistory).filter(AIChatHistory.user_id == user.id).delete()
+    db.commit()
+    return {"msg": "Chat history cleared"}
+
+# ============================================================
+# MANUAL QUESTIONS — ADMIN
+# ============================================================
 @app.post("/admin/add-question")
 def add_question(data: ManualQuestionCreate, db=Depends(get_db)):
-    """
-    Add a single question manually.
-    You can also add directly in Neon dashboard → manual_questions table.
-    """
     q = ManualQuestion(
-        subject        = data.subject.strip(),
-        level          = data.level.strip(),
-        topic          = data.topic.strip() if data.topic else None,
-        question_text  = data.question_text.strip(),
-        option_a       = data.option_a.strip(),
-        option_b       = data.option_b.strip(),
-        option_c       = data.option_c.strip(),
-        option_d       = data.option_d.strip(),
-        correct_answer = data.correct_answer.upper().strip(),
-        explanation    = data.explanation,
-        source         = data.source or "manual",
-        added_by       = data.added_by or "admin",
-        created_at     = now_str()
+        subject=data.subject.strip(), level=data.level.strip(),
+        topic=data.topic.strip() if data.topic else None,
+        question_text=data.question_text.strip(),
+        option_a=data.option_a.strip(), option_b=data.option_b.strip(),
+        option_c=data.option_c.strip(), option_d=data.option_d.strip(),
+        correct_answer=data.correct_answer.upper().strip(),
+        explanation=data.explanation, source=data.source or "manual",
+        added_by=data.added_by or "admin", created_at=now_str()
     )
     db.add(q); db.commit(); db.refresh(q)
-    return {"msg": "Question added successfully", "id": q.id, "subject": q.subject, "level": q.level}
-
+    return {"msg": "Question added", "id": q.id, "subject": q.subject, "level": q.level}
 
 @app.post("/admin/add-questions-bulk")
 def add_questions_bulk(data: BulkQuestionsCreate, db=Depends(get_db)):
-    """
-    Add multiple questions at once.
-    Send a JSON list of questions.
-    """
     added = []
     for qd in data.questions:
         q = ManualQuestion(
-            subject        = qd.subject.strip(),
-            level          = qd.level.strip(),
-            topic          = qd.topic.strip() if qd.topic else None,
-            question_text  = qd.question_text.strip(),
-            option_a       = qd.option_a.strip(),
-            option_b       = qd.option_b.strip(),
-            option_c       = qd.option_c.strip(),
-            option_d       = qd.option_d.strip(),
-            correct_answer = qd.correct_answer.upper().strip(),
-            explanation    = qd.explanation,
-            source         = qd.source or "manual",
-            added_by       = qd.added_by or "admin",
-            created_at     = now_str()
+            subject=qd.subject.strip(), level=qd.level.strip(),
+            topic=qd.topic.strip() if qd.topic else None,
+            question_text=qd.question_text.strip(),
+            option_a=qd.option_a.strip(), option_b=qd.option_b.strip(),
+            option_c=qd.option_c.strip(), option_d=qd.option_d.strip(),
+            correct_answer=qd.correct_answer.upper().strip(),
+            explanation=qd.explanation, source=qd.source or "manual",
+            added_by=qd.added_by or "admin", created_at=now_str()
         )
-        db.add(q)
-        added.append({"subject": q.subject, "level": q.level})
+        db.add(q); added.append({"subject": q.subject, "level": q.level})
     db.commit()
-    return {"msg": f"{len(added)} questions added successfully", "questions": added}
-
+    return {"msg": f"{len(added)} questions added", "questions": added}
 
 @app.get("/admin/questions")
 def list_questions(subject: str = None, level: str = None, limit: int = 50, db=Depends(get_db)):
-    """
-    View all manual questions. Filter by subject and/or level.
-    """
     query = db.query(ManualQuestion)
     if subject: query = query.filter(ManualQuestion.subject.ilike(f"%{subject}%"))
     if level:   query = query.filter(ManualQuestion.level.ilike(f"%{level}%"))
     questions = query.limit(limit).all()
-    return {
-        "total": query.count(),
-        "questions": [
-            {"id": q.id, "subject": q.subject, "level": q.level,
-             "topic": q.topic, "question_text": q.question_text,
-             "correct_answer": q.correct_answer, "source": q.source}
-            for q in questions
-        ]
-    }
-
+    return {"total": query.count(), "questions": [
+        {"id": q.id, "subject": q.subject, "level": q.level, "topic": q.topic,
+         "question_text": q.question_text, "correct_answer": q.correct_answer, "source": q.source}
+        for q in questions]}
 
 @app.delete("/admin/question/{question_id}")
 def delete_question(question_id: int, db=Depends(get_db)):
-    """
-    Delete a question by ID.
-    """
     q = db.query(ManualQuestion).filter(ManualQuestion.id == question_id).first()
     if not q: raise HTTPException(404, "Question not found")
     db.delete(q); db.commit()
     return {"msg": f"Question {question_id} deleted"}
 
-
 @app.get("/admin/questions/count")
 def count_questions(db=Depends(get_db)):
-    """
-    Quick count of all manual questions by subject.
-    """
     all_q = db.query(ManualQuestion).all()
     counts = {}
     for q in all_q:
@@ -754,50 +832,34 @@ def count_questions(db=Depends(get_db)):
         counts[key] = counts.get(key, 0) + 1
     return {"total": len(all_q), "by_subject_level": counts}
 
-
 # ============================================================
 # QUIZ — DATABASE FIRST, AI FALLBACK
 # ============================================================
 @app.get("/quiz/{topic}")
 def smart_quiz(topic: str, level: str = "SSS", subject: str = "General", db=Depends(get_db)):
-    """
-    1. Checks manual_questions database first
-    2. If 5+ questions found → serves from database (no AI cost!)
-    3. If fewer than 5 → generates with AI (cached for next time)
-    """
-    # Step 1: Query database for matching questions
-    db_questions = db.query(ManualQuestion).filter(
+    # 1. Check DB first
+    db_qs = db.query(ManualQuestion).filter(
         ManualQuestion.subject.ilike(f"%{subject}%"),
         ManualQuestion.level.ilike(f"%{level}%")
     ).all()
 
-    # Also try matching by topic if provided
     if topic.lower() != subject.lower():
-        topic_questions = db.query(ManualQuestion).filter(
-            ManualQuestion.topic.ilike(f"%{topic}%")
-        ).all()
-        # Merge and deduplicate
-        all_ids    = {q.id for q in db_questions}
-        db_questions = db_questions + [q for q in topic_questions if q.id not in all_ids]
+        topic_qs = db.query(ManualQuestion).filter(ManualQuestion.topic.ilike(f"%{topic}%")).all()
+        existing = {q.id for q in db_qs}
+        db_qs    = db_qs + [q for q in topic_qs if q.id not in existing]
 
-    # Step 2: If we have enough DB questions, use them
-    if len(db_questions) >= 5:
-        selected = random.sample(db_questions, min(5, len(db_questions)))
-        quiz     = []
-        for q in selected:
-            quiz.append({
-                "question":       q.question_text,
-                "options":        [f"A) {q.option_a}", f"B) {q.option_b}", f"C) {q.option_c}", f"D) {q.option_d}"],
-                "answer":         q.correct_answer,
-                "explanation":    q.explanation or "",
-                "time_limit_sec": 30,
-                "source":         "database"
-            })
-        print(f"[QUIZ] Served {len(quiz)} questions from database for {subject} {level}")
+    # 2. Enough DB questions — serve them free
+    if len(db_qs) >= 5:
+        selected = random.sample(db_qs, min(5, len(db_qs)))
+        quiz = [{"question": q.question_text,
+                 "options":  [f"A) {q.option_a}", f"B) {q.option_b}", f"C) {q.option_c}", f"D) {q.option_d}"],
+                 "answer":   q.correct_answer, "explanation": q.explanation or "",
+                 "time_limit_sec": 30, "source": "database"} for q in selected]
+        print(f"[QUIZ] {len(quiz)} questions from DB for {subject} {level}")
         return {"topic": topic, "level": level, "subject": subject, "quiz": quiz, "source": "database"}
 
-    # Step 3: Not enough DB questions — use AI (result is cached)
-    print(f"[QUIZ] Only {len(db_questions)} DB questions found. Using AI for {subject} {level} - {topic}")
+    # 3. AI fallback (cached)
+    print(f"[QUIZ] Using AI for {subject} {level} - {topic}")
     prompt = f"""Generate 5 multiple-choice questions about '{topic}' for a Nigerian {level} {subject} student.
     Return ONLY a JSON list:
     [{{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":"A","explanation":"...","time_limit_sec":30}}]"""
@@ -808,8 +870,7 @@ def smart_quiz(topic: str, level: str = "SSS", subject: str = "General", db=Depe
         for q in quiz: q["source"] = "ai"
         return {"topic": topic, "level": level, "subject": subject, "quiz": quiz, "source": "ai"}
     except:
-        return {"topic": topic, "quiz": raw, "error": "Parsing failed", "source": "ai"}
-
+        return {"topic": topic, "quiz": [], "error": "Could not generate quiz. Please try again.", "source": "ai"}
 
 # ============================================================
 # QUIZ SCORE TRACKING
@@ -824,7 +885,7 @@ def save_quiz_result(data: QuizResultCreate, db=Depends(get_db)):
     user.progress_score = (user.progress_score or 0) + points
     user.coins          = (user.coins          or 0) + points
     db.commit()
-    newly = check_and_award_badges(user.id, db)
+    newly      = check_and_award_badges(user.id, db)
     quiz_count = db.query(QuizResult).filter(QuizResult.user_id == user.id).count()
     if quiz_count == 1:
         qs = db.query(Badge).filter(Badge.name == "Quiz Starter").first()
@@ -870,25 +931,31 @@ def add_past_question(data: PastQuestionCreate, db=Depends(get_db)):
 
 @app.get("/past-questions/{exam_type}/{subject}")
 def get_past_questions(exam_type: str, subject: str, year: int = None, db=Depends(get_db)):
-    query = db.query(PastQuestion).filter(PastQuestion.exam_type == exam_type.upper(), PastQuestion.subject == subject)
+    query = db.query(PastQuestion).filter(
+        PastQuestion.exam_type == exam_type.upper(), PastQuestion.subject == subject)
     if year: query = query.filter(PastQuestion.year == year)
     return [{"id": q.id, "year": q.year, "question_text": q.question_text,
-             "option_a": q.option_a, "option_b": q.option_b, "option_c": q.option_c, "option_d": q.option_d,
-             "correct_answer": q.correct_answer, "explanation": q.explanation} for q in query.limit(20).all()]
+             "option_a": q.option_a, "option_b": q.option_b,
+             "option_c": q.option_c, "option_d": q.option_d,
+             "correct_answer": q.correct_answer, "explanation": q.explanation}
+            for q in query.limit(20).all()]
 
 @app.get("/past-questions/random/{subject}")
 def random_past_question(subject: str, exam: str = "WAEC", db=Depends(get_db)):
-    questions = db.query(PastQuestion).filter(PastQuestion.exam_type == exam.upper(), PastQuestion.subject == subject).all()
+    questions = db.query(PastQuestion).filter(
+        PastQuestion.exam_type == exam.upper(), PastQuestion.subject == subject).all()
     if not questions:
-        prompt = f"""Generate 1 {exam} past question style MCQ for {subject} (Nigerian curriculum).
+        prompt = f"""Generate 1 {exam} past question MCQ for {subject} (Nigerian curriculum).
         Return ONLY JSON: {{"question_text":"...","option_a":"...","option_b":"...","option_c":"...","option_d":"...","correct_answer":"A","explanation":"..."}}"""
         raw = get_ai_response(prompt)
         try: return {"source": "ai_generated", "question": json.loads(raw.replace("```json","").replace("```","").strip())}
         except: return {"error": "No questions found"}
     q = random.choice(questions)
-    return {"source": "database", "question": {"id": q.id, "year": q.year, "question_text": q.question_text,
-            "option_a": q.option_a, "option_b": q.option_b, "option_c": q.option_c, "option_d": q.option_d,
-            "correct_answer": q.correct_answer, "explanation": q.explanation}}
+    return {"source": "database", "question": {
+        "id": q.id, "year": q.year, "question_text": q.question_text,
+        "option_a": q.option_a, "option_b": q.option_b,
+        "option_c": q.option_c, "option_d": q.option_d,
+        "correct_answer": q.correct_answer, "explanation": q.explanation}}
 
 # ============================================================
 # DAILY CHALLENGE
@@ -908,7 +975,8 @@ def get_daily_challenge(db=Depends(get_db)):
                 option_a=q["option_a"], option_b=q["option_b"],
                 option_c=q["option_c"], option_d=q["option_d"], correct_answer=q["correct_answer"])
             db.add(existing); db.commit(); db.refresh(existing)
-        except: return {"error": "Could not generate daily challenge. Try again shortly."}
+        except:
+            return {"error": "Could not generate daily challenge. Try again shortly."}
     return {"id": existing.id, "date": existing.date, "question_text": existing.question_text,
             "option_a": existing.option_a, "option_b": existing.option_b,
             "option_c": existing.option_c, "option_d": existing.option_d}
@@ -920,8 +988,9 @@ def submit_daily_challenge(data: DailyChallengeSubmit, db=Depends(get_db)):
     challenge = db.query(DailyChallenge).filter(DailyChallenge.date == today_str()).first()
     if not challenge: raise HTTPException(404, "No challenge today")
     already = db.query(DailyChallengeAttempt).filter(
-        DailyChallengeAttempt.user_id == user.id, DailyChallengeAttempt.challenge_id == challenge.id).first()
-    if already: return {"msg": "Already attempted today!", "already_attempted": True, "correct_answer": challenge.correct_answer}
+        DailyChallengeAttempt.user_id == user.id,
+        DailyChallengeAttempt.challenge_id == challenge.id).first()
+    if already: return {"msg": "Already attempted!", "already_attempted": True, "correct_answer": challenge.correct_answer}
     is_correct = data.answer.upper().strip() == challenge.correct_answer.upper().strip()
     db.add(DailyChallengeAttempt(user_id=user.id, challenge_id=challenge.id, answered_at=now_str(), was_correct=is_correct))
     if is_correct:
@@ -1000,24 +1069,6 @@ def get_friends(username: str, db=Depends(get_db)):
 # ============================================================
 # AI FEATURES
 # ============================================================
-@app.post("/ai/study-plan")
-def ai_study_plan(data: StudyPlanRequest):
-    prompt = f"""Create a weekly study plan for a Nigerian {data.level} student.
-    Subjects: {data.subjects}. Exam date: {data.exam_date}. Hours/day: {data.hours_per_day}.
-    Focus on Nigerian curriculum (WAEC/JAMB). Day-by-day schedule with specific topics."""
-    return {"username": data.username, "study_plan": get_ai_response(prompt)}
-
-@app.post("/ai/check-answer")
-def check_answer(data: AnswerCheckRequest):
-    prompt = f"""A Nigerian student answered a {data.subject} question.
-    Question: {data.question}. Student: {data.student_answer}. Correct: {data.correct_answer}.
-    Tell them if right or wrong, explain why simply, give memory tip. Be encouraging."""
-    return {"is_correct": data.student_answer.strip().upper() == data.correct_answer.strip().upper(),
-            "feedback": get_ai_response(prompt)}
-
-# ============================================================
-# LEARN
-# ============================================================
 @app.get("/learn/{topic}")
 def learn(topic: str, username: str, level: str = "SSS", subject: str = "General", db=Depends(get_db)):
     prompt = f"Explain '{topic}' to a Nigerian {level} {subject} student in 200 words. Use simple language and Nigerian examples."
@@ -1026,40 +1077,51 @@ def learn(topic: str, username: str, level: str = "SSS", subject: str = "General
     if user: user.last_learned_topic = topic; db.commit()
     return {"topic": topic, "lesson": lesson, "level": level, "subject": subject}
 
+@app.post("/ai/study-plan")
+def ai_study_plan(data: StudyPlanRequest):
+    prompt = f"""Create a weekly study plan for a Nigerian {data.level} student.
+    Subjects: {data.subjects}. Exam: {data.exam_date}. Hours/day: {data.hours_per_day}.
+    Nigerian curriculum (WAEC/JAMB). Day-by-day with specific topics."""
+    return {"username": data.username, "study_plan": get_ai_response(prompt)}
+
+@app.post("/ai/check-answer")
+def check_answer(data: AnswerCheckRequest):
+    prompt = f"""Nigerian student answered a {data.subject} question.
+    Q: {data.question}. Their answer: {data.student_answer}. Correct: {data.correct_answer}.
+    Tell if right/wrong, explain why simply, give memory tip. Be encouraging."""
+    return {"is_correct": data.student_answer.strip().upper() == data.correct_answer.strip().upper(),
+            "feedback": get_ai_response(prompt)}
+
 # ============================================================
 # KIDS GAMES
 # ============================================================
 @app.get("/games/word-scramble/{subject}")
 def word_scramble(subject: str, level: str = "Primary"):
-    prompt = f"""Give 1 educational word for {subject} ({level} level, Nigerian curriculum).
-    Return ONLY JSON: {{"word":"...","scrambled":"...","hint":"...","meaning":"..."}}"""
-    raw = get_ai_response(prompt)
+    raw = get_ai_response(f"""1 educational word for {subject} ({level}, Nigerian curriculum).
+    ONLY JSON: {{"word":"...","scrambled":"...","hint":"...","meaning":"..."}}""")
     try: return json.loads(raw.replace("```json","").replace("```","").strip())
-    except: return {"error": "Could not generate word scramble"}
+    except: return {"error": "Could not generate"}
 
 @app.get("/games/spell-challenge/{level}")
 def spell_challenge(level: str):
-    prompt = f"""Give 1 spelling challenge word for Nigerian {level} student.
-    Return ONLY JSON: {{"word":"...","hint":"...","example_sentence":"...","difficulty":"easy/medium/hard"}}"""
-    raw = get_ai_response(prompt)
+    raw = get_ai_response(f"""1 spelling word for Nigerian {level} student.
+    ONLY JSON: {{"word":"...","hint":"...","example_sentence":"...","difficulty":"easy/medium/hard"}}""")
     try: return json.loads(raw.replace("```json","").replace("```","").strip())
-    except: return {"error": "Could not generate spelling challenge"}
+    except: return {"error": "Could not generate"}
 
 @app.get("/games/math-challenge/{level}")
 def math_challenge(level: str):
-    prompt = f"""Generate 1 fun math problem for Nigerian {level} student.
-    Return ONLY JSON: {{"question":"...","answer":"...","solution_steps":"...","difficulty":"easy/medium/hard"}}"""
-    raw = get_ai_response(prompt)
+    raw = get_ai_response(f"""1 math problem for Nigerian {level} student.
+    ONLY JSON: {{"question":"...","answer":"...","solution_steps":"...","difficulty":"easy/medium/hard"}}""")
     try: return json.loads(raw.replace("```json","").replace("```","").strip())
-    except: return {"error": "Could not generate math challenge"}
+    except: return {"error": "Could not generate"}
 
 @app.get("/games/treasure-hunt/{level}")
 def treasure_hunt(level: str, subject: str = "General"):
-    prompt = f"""Create a fun educational treasure hunt clue for Nigerian {level} student about {subject}.
-    Return ONLY JSON: {{"clue":"...","question":"...","answer":"...","reward_coins":5,"fun_fact":"..."}}"""
-    raw = get_ai_response(prompt)
+    raw = get_ai_response(f"""Educational treasure hunt clue for Nigerian {level} student about {subject}.
+    ONLY JSON: {{"clue":"...","question":"...","answer":"...","reward_coins":5,"fun_fact":"..."}}""")
     try: return json.loads(raw.replace("```json","").replace("```","").strip())
-    except: return {"error": "Could not generate treasure hunt"}
+    except: return {"error": "Could not generate"}
 
 @app.post("/games/save-score")
 def save_game_score(data: GameScoreSave, db=Depends(get_db)):
@@ -1119,7 +1181,7 @@ def add_topic(data: TopicCreate, db=Depends(get_db)):
     return {"id": t.id, "msg": "Topic added"}
 
 # ============================================================
-# CACHE STATUS
+# CACHE
 # ============================================================
 @app.get("/cache/status")
 def cache_status():
@@ -1160,7 +1222,8 @@ async def websocket_endpoint(websocket: WebSocket, room: str):
     count = len(active_connections[room])
     await websocket.send_json({"type": "system", "message": f"✅ Connected to '{room}' — {count} student(s) online"})
     for conn in active_connections[room]:
-        if conn != websocket: await conn.send_json({"type": "system", "message": "👤 A new student joined"})
+        if conn != websocket:
+            await conn.send_json({"type": "system", "message": "👤 A new student joined"})
     try:
         while True:
             data = await websocket.receive_json()
@@ -1170,7 +1233,7 @@ async def websocket_endpoint(websocket: WebSocket, room: str):
                 await conn.send_json({"type": "chat", "username": user, "message": msg})
             if msg.startswith("/ai"):
                 query    = msg.replace("/ai", "").strip()
-                response = get_ai_response(f"You are an Ox-Bridge AI tutor for Nigerian students. Answer clearly: {query}")
+                response = get_ai_response(f"You are Ox-Bridge AI Tutor for Nigerian students. Answer clearly and simply: {query}")
                 for conn in active_connections[room]:
                     await conn.send_json({"type": "ai", "username": "🤖 Ox-Bridge Tutor", "message": response})
     except WebSocketDisconnect:
