@@ -28,23 +28,20 @@ TOKEN_EXPIRE_HOURS = 72
 
 # ============================================================
 # DATABASE ENGINE — FIXED FOR NEON
-# pool_pre_ping   = auto-reconnect if Neon was sleeping
-# pool_recycle    = refresh connections every 5 mins
-# connect_timeout = don't hang forever on connection
 # ============================================================
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping   = True,
-    pool_recycle    = 300,
-    pool_size       = 5,
-    max_overflow    = 10,
-    connect_args    = {
-        "connect_timeout": 10,
-        "sslmode":         "require",
-        "keepalives":      1,
-        "keepalives_idle": 30,
-        "keepalives_interval": 10,
-        "keepalives_count": 5,
+    pool_pre_ping      = True,
+    pool_recycle       = 300,
+    pool_size          = 5,
+    max_overflow       = 10,
+    connect_args       = {
+        "connect_timeout":    10,
+        "sslmode":            "require",
+        "keepalives":         1,
+        "keepalives_idle":    30,
+        "keepalives_interval":10,
+        "keepalives_count":   5,
     }
 )
 
@@ -53,7 +50,7 @@ Base         = declarative_base()
 pwd_context  = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
 
 # ============================================================
-# AI RESPONSE CACHE — saves API calls
+# AI RESPONSE CACHE
 # ============================================================
 ai_cache: dict = {}
 
@@ -211,12 +208,11 @@ class GameScore(Base):
     score     = Column(Integer)
     played_at = Column(String)
 
-# NEW: AI Chat History
 class AIChatHistory(Base):
     __tablename__ = "ai_chat_history"
     id         = Column(Integer, primary_key=True, index=True)
     user_id    = Column(Integer, ForeignKey("users.id"))
-    role       = Column(String)   # "user" or "assistant"
+    role       = Column(String)
     message    = Column(String)
     created_at = Column(String)
 
@@ -225,9 +221,9 @@ class AIChatHistory(Base):
 # ============================================================
 try:
     Base.metadata.create_all(bind=engine, checkfirst=True)
-    print("[DB] Tables created/verified successfully")
+    print("[DB] Tables created/verified ✓")
 except Exception as e:
-    print(f"[DB ERROR] Could not create tables: {e}")
+    print(f"[DB ERROR] {e}")
 
 def run_migrations():
     migrations = [
@@ -248,12 +244,10 @@ def run_migrations():
     try:
         with engine.connect() as conn:
             for sql in migrations:
-                try:
-                    conn.execute(text(sql))
-                except Exception as e:
-                    print(f"[MIGRATION] Skipped: {e}")
+                try:    conn.execute(text(sql))
+                except: pass
             conn.commit()
-        print("[DB] Migrations complete")
+        print("[DB] Migrations complete ✓")
     except Exception as e:
         print(f"[DB MIGRATION ERROR] {e}")
 
@@ -274,7 +268,7 @@ def seed_badges():
                 Badge(name="Speed Learner", icon="⚡", description="Completed 10 quizzes",      points_required=0),
             ])
             db.commit()
-            print("[DB] Default badges seeded")
+            print("[DB] Badges seeded ✓")
         db.close()
     except Exception as e:
         print(f"[SEED ERROR] {e}")
@@ -291,7 +285,9 @@ def hash_password(pw: str) -> str: return pwd_context.hash(pw)
 
 def verify_password(plain: str, hashed: str) -> bool:
     try:    return pwd_context.verify(plain, hashed)
-    except: return False
+    except Exception as e:
+        print(f"[PWD VERIFY ERROR] {e}")
+        return False
 
 def create_token(username: str) -> str:
     exp = datetime.now(timezone.utc) + timedelta(hours=TOKEN_EXPIRE_HOURS)
@@ -340,8 +336,7 @@ def update_streak(user: User, db):
 # ============================================================
 def get_ai_response(prompt: str) -> str:
     cached = get_cached(prompt)
-    if cached:
-        return cached
+    if cached: return cached
 
     result = None
 
@@ -392,7 +387,8 @@ def get_ai_response(prompt: str) -> str:
             res = requests.post(
                 "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2",
                 headers={"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"},
-                json={"inputs": f"[INST] {prompt} [/INST]", "parameters": {"max_new_tokens": 600, "temperature": 0.7, "return_full_text": False}},
+                json={"inputs": f"[INST] {prompt} [/INST]",
+                      "parameters": {"max_new_tokens": 600, "temperature": 0.7, "return_full_text": False}},
                 timeout=25
             )
             if res.status_code == 200:
@@ -435,6 +431,15 @@ class UserCreate(BaseModel):
     username: str
     email:    str
     password: str
+
+# ✅ FIX: Login now uses JSON body — no more URL encoding issues
+# Special characters like @, #, !, % in passwords now work perfectly
+class LoginData(BaseModel):
+    username: str
+    password: str
+
+class TokenValidate(BaseModel):
+    token: str
 
 class ProfileUpdate(BaseModel):
     full_name:   Optional[str] = None
@@ -514,9 +519,6 @@ class GameScoreSave(BaseModel):
     game_type: str
     score:     int
 
-class TokenValidate(BaseModel):
-    token: str
-
 class SubjectCreate(BaseModel):
     name:  str
     level: str
@@ -525,7 +527,6 @@ class TopicCreate(BaseModel):
     title:      str
     subject_id: int
 
-# NEW: AI Chat schemas
 class AIChatMessage(BaseModel):
     username: str
     message:  str
@@ -541,16 +542,16 @@ class AIChatHistoryClear(BaseModel):
 @app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {
-        "app":          "Ox-Bridge Learning Hub",
-        "version":      "2.0.0",
-        "status":       "running ✅",
-        "powered_by":   "Ox-Bridge Technology",
-        "ai_providers": ["Groq", "Gemini", "OpenRouter", "HuggingFace"],
-        "cache_size":   len(ai_cache)
+        "app":         "Ox-Bridge Learning Hub",
+        "version":     "2.0.0",
+        "status":      "running ✅",
+        "powered_by":  "Ox-Bridge Technology 🇳🇬",
+        "ai_engines":  ["Groq", "Gemini", "OpenRouter", "HuggingFace"],
+        "cache_size":  len(ai_cache)
     }
 
 # ============================================================
-# AUTH
+# AUTH — LOGIN FIXED
 # ============================================================
 @app.post("/signup")
 def signup(user: UserCreate, db=Depends(get_db)):
@@ -578,30 +579,41 @@ def signup(user: UserCreate, db=Depends(get_db)):
     fs = db.query(Badge).filter(Badge.name == "First Step").first()
     if fs:
         db.add(UserBadge(user_id=new_user.id, badge_id=fs.id, earned_at=now_str()))
-        db.add(Notification(user_id=new_user.id, message="👣 Welcome! You earned the 'First Step' badge!", created_at=now_str()))
+        db.add(Notification(
+            user_id    = new_user.id,
+            message    = "👣 Welcome! You earned the 'First Step' badge!",
+            created_at = now_str()
+        ))
         db.commit()
 
     return {"msg": "Account created successfully! Please login.", "username": new_user.username}
 
 
+# ✅ LOGIN FIXED — uses JSON body, handles ALL special characters in passwords
 @app.post("/login")
-def login(username: str, password: str, db=Depends(get_db)):
-    username = username.strip()
-    password = password.strip()
+def login(data: LoginData, db=Depends(get_db)):
+    username = data.username.strip()
+    password = data.password.strip()
+
+    print(f"[LOGIN] Attempt for username: '{username}'")
 
     if not username or not password:
         raise HTTPException(400, "Username and password are required")
 
+    # Case-insensitive username lookup
     user = db.query(User).filter(User.username.ilike(username)).first()
+
     if not user:
-        print(f"[LOGIN] Not found: '{username}'")
+        print(f"[LOGIN] ✗ User not found: '{username}'")
         raise HTTPException(401, "No account found with that username. Please sign up first.")
 
     ok = verify_password(password, user.hashed_password)
-    print(f"[LOGIN] '{username}' — match: {ok}")
+    print(f"[LOGIN] '{username}' — password match: {ok}")
+
     if not ok:
         raise HTTPException(401, "Wrong password. Please try again.")
 
+    print(f"[LOGIN] ✓ Success for '{username}'")
     return {
         "access_token": create_token(user.username),
         "token_type":   "bearer",
@@ -641,8 +653,10 @@ def get_profile(username: str, db=Depends(get_db)):
         b = db.query(Badge).filter(Badge.id == ub.badge_id).first()
         if b: badges.append({"name": b.name, "icon": b.icon, "earned_at": ub.earned_at})
     return {
-        "username":    user.username,   "full_name":   user.full_name,
-        "bio":         user.bio,         "profile_pic": user.profile_pic,
+        "username":    user.username,
+        "full_name":   user.full_name,
+        "bio":         user.bio,
+        "profile_pic": user.profile_pic,
         "score":       user.progress_score or 0,
         "streak":      user.study_streak   or 0,
         "coins":       user.coins          or 0,
@@ -697,61 +711,46 @@ def get_user_badges(username: str, db=Depends(get_db)):
     return result
 
 # ============================================================
-# AI CHAT SPACE — NEW FEATURE
-# Users can chat freely with the AI tutor and history is saved
+# AI CHAT SPACE
 # ============================================================
 @app.post("/ai/chat")
 def ai_chat(data: AIChatMessage, db=Depends(get_db)):
-    """
-    Dedicated AI chat endpoint.
-    Keeps conversation context so AI remembers previous messages in session.
-    """
     user = db.query(User).filter(User.username == data.username).first()
     if not user: raise HTTPException(404, "User not found")
 
-    # Get last 6 messages for context (3 exchanges)
+    # Get last 6 messages for context
     history = db.query(AIChatHistory).filter(
         AIChatHistory.user_id == user.id
     ).order_by(AIChatHistory.id.desc()).limit(6).all()
     history.reverse()
 
-    # Build context string
     context = ""
     for h in history:
-        role  = "Student" if h.role == "user" else "Tutor"
+        role     = "Student" if h.role == "user" else "Tutor"
         context += f"{role}: {h.message}\n"
 
-    prompt = f"""You are Ox-Bridge AI Tutor — a friendly, knowledgeable tutor for Nigerian students 
-    ({data.level} level, {data.subject} subject).
-    
-    You explain things simply, use Nigerian examples where helpful, and encourage students.
+    prompt = f"""You are Ox-Bridge AI Tutor — a friendly, knowledgeable tutor for Nigerian students
+    (Level: {data.level}, Subject: {data.subject}).
+    Explain things simply, use Nigerian examples, and encourage students.
     You are built by Ox-Bridge Technology.
-    
+
     Previous conversation:
     {context}
-    
+
     Student: {data.message}
-    
+
     Tutor:"""
 
     response = get_ai_response(prompt)
 
-    # Save to chat history
-    db.add(AIChatHistory(user_id=user.id, role="user",      message=data.message,  created_at=now_str()))
-    db.add(AIChatHistory(user_id=user.id, role="assistant", message=response,       created_at=now_str()))
+    db.add(AIChatHistory(user_id=user.id, role="user",      message=data.message, created_at=now_str()))
+    db.add(AIChatHistory(user_id=user.id, role="assistant", message=response,      created_at=now_str()))
     db.commit()
 
-    return {
-        "response":  response,
-        "username":  data.username,
-        "subject":   data.subject,
-        "level":     data.level,
-        "timestamp": now_str()
-    }
+    return {"response": response, "username": data.username, "timestamp": now_str()}
 
 @app.get("/ai/chat/history/{username}")
 def get_chat_history(username: str, limit: int = 20, db=Depends(get_db)):
-    """Get user's AI chat history."""
     user = db.query(User).filter(User.username == username).first()
     if not user: raise HTTPException(404, "User not found")
     history = db.query(AIChatHistory).filter(
@@ -762,7 +761,6 @@ def get_chat_history(username: str, limit: int = 20, db=Depends(get_db)):
 
 @app.post("/ai/chat/clear")
 def clear_chat_history(data: AIChatHistoryClear, db=Depends(get_db)):
-    """Clear user's AI chat history."""
     user = db.query(User).filter(User.username == data.username).first()
     if not user: raise HTTPException(404, "User not found")
     db.query(AIChatHistory).filter(AIChatHistory.user_id == user.id).delete()
@@ -837,28 +835,25 @@ def count_questions(db=Depends(get_db)):
 # ============================================================
 @app.get("/quiz/{topic}")
 def smart_quiz(topic: str, level: str = "SSS", subject: str = "General", db=Depends(get_db)):
-    # 1. Check DB first
     db_qs = db.query(ManualQuestion).filter(
         ManualQuestion.subject.ilike(f"%{subject}%"),
         ManualQuestion.level.ilike(f"%{level}%")
     ).all()
 
     if topic.lower() != subject.lower():
-        topic_qs = db.query(ManualQuestion).filter(ManualQuestion.topic.ilike(f"%{topic}%")).all()
-        existing = {q.id for q in db_qs}
-        db_qs    = db_qs + [q for q in topic_qs if q.id not in existing]
+        topic_qs  = db.query(ManualQuestion).filter(ManualQuestion.topic.ilike(f"%{topic}%")).all()
+        existing  = {q.id for q in db_qs}
+        db_qs     = db_qs + [q for q in topic_qs if q.id not in existing]
 
-    # 2. Enough DB questions — serve them free
     if len(db_qs) >= 5:
         selected = random.sample(db_qs, min(5, len(db_qs)))
         quiz = [{"question": q.question_text,
                  "options":  [f"A) {q.option_a}", f"B) {q.option_b}", f"C) {q.option_c}", f"D) {q.option_d}"],
-                 "answer":   q.correct_answer, "explanation": q.explanation or "",
+                 "answer": q.correct_answer, "explanation": q.explanation or "",
                  "time_limit_sec": 30, "source": "database"} for q in selected]
-        print(f"[QUIZ] {len(quiz)} questions from DB for {subject} {level}")
+        print(f"[QUIZ] {len(quiz)} from DB for {subject} {level}")
         return {"topic": topic, "level": level, "subject": subject, "quiz": quiz, "source": "database"}
 
-    # 3. AI fallback (cached)
     print(f"[QUIZ] Using AI for {subject} {level} - {topic}")
     prompt = f"""Generate 5 multiple-choice questions about '{topic}' for a Nigerian {level} {subject} student.
     Return ONLY a JSON list:
@@ -990,7 +985,8 @@ def submit_daily_challenge(data: DailyChallengeSubmit, db=Depends(get_db)):
     already = db.query(DailyChallengeAttempt).filter(
         DailyChallengeAttempt.user_id == user.id,
         DailyChallengeAttempt.challenge_id == challenge.id).first()
-    if already: return {"msg": "Already attempted!", "already_attempted": True, "correct_answer": challenge.correct_answer}
+    if already:
+        return {"msg": "Already attempted!", "already_attempted": True, "correct_answer": challenge.correct_answer}
     is_correct = data.answer.upper().strip() == challenge.correct_answer.upper().strip()
     db.add(DailyChallengeAttempt(user_id=user.id, challenge_id=challenge.id, answered_at=now_str(), was_correct=is_correct))
     if is_correct:
@@ -1118,7 +1114,7 @@ def math_challenge(level: str):
 
 @app.get("/games/treasure-hunt/{level}")
 def treasure_hunt(level: str, subject: str = "General"):
-    raw = get_ai_response(f"""Educational treasure hunt clue for Nigerian {level} student about {subject}.
+    raw = get_ai_response(f"""Educational treasure hunt for Nigerian {level} student about {subject}.
     ONLY JSON: {{"clue":"...","question":"...","answer":"...","reward_coins":5,"fun_fact":"..."}}""")
     try: return json.loads(raw.replace("```json","").replace("```","").strip())
     except: return {"error": "Could not generate"}
@@ -1233,7 +1229,7 @@ async def websocket_endpoint(websocket: WebSocket, room: str):
                 await conn.send_json({"type": "chat", "username": user, "message": msg})
             if msg.startswith("/ai"):
                 query    = msg.replace("/ai", "").strip()
-                response = get_ai_response(f"You are Ox-Bridge AI Tutor for Nigerian students. Answer clearly and simply: {query}")
+                response = get_ai_response(f"You are Ox-Bridge AI Tutor for Nigerian students. Answer clearly: {query}")
                 for conn in active_connections[room]:
                     await conn.send_json({"type": "ai", "username": "🤖 Ox-Bridge Tutor", "message": response})
     except WebSocketDisconnect:
