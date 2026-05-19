@@ -332,13 +332,16 @@ def update_streak(user: User, db):
     db.commit()
 
 # ============================================================
-# HYBRID AI ROUTER — 4 PROVIDERS + CACHE
+# HYBRID AI ROUTER — 4 PROVIDERS + CACHE + DETAILED LOGGING
 # ============================================================
 def get_ai_response(prompt: str) -> str:
     cached = get_cached(prompt)
-    if cached: return cached
+    if cached: 
+        print(f"[AI] Cache hit for: {prompt[:50]}...")
+        return cached
 
     result = None
+    errors = []  # Track which providers failed and why
 
     # 1. Groq
     if GROQ_KEY and not result:
@@ -346,62 +349,108 @@ def get_ai_response(prompt: str) -> str:
             res = requests.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
-                json={"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": prompt}]},
+                json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}]},
                 timeout=15
             )
             if res.status_code == 200:
                 result = res.json()['choices'][0]['message']['content']
                 print("[AI] Groq ✓")
-        except Exception as e: print(f"[AI] Groq ✗: {e}")
+            else:
+                err = f"Groq HTTP {res.status_code}: {res.text[:200]}"
+                errors.append(err)
+                print(f"[AI] {err}")
+        except Exception as e: 
+            err = f"Groq exception: {str(e)}"
+            errors.append(err)
+            print(f"[AI] {err}")
 
-    # 2. Gemini
+    # 2. Gemini (FIXED: updated model name)
     if GEMINI_KEY and not result:
         try:
             res = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
                 json={"contents": [{"parts": [{"text": prompt}]}]},
                 timeout=15
             )
             if res.status_code == 200:
                 result = res.json()["candidates"][0]["content"]["parts"][0]["text"]
                 print("[AI] Gemini ✓")
-        except Exception as e: print(f"[AI] Gemini ✗: {e}")
+            else:
+                err = f"Gemini HTTP {res.status_code}: {res.text[:200]}"
+                errors.append(err)
+                print(f"[AI] {err}")
+        except Exception as e: 
+            err = f"Gemini exception: {str(e)}"
+            errors.append(err)
+            print(f"[AI] {err}")
 
-    # 3. OpenRouter
+    # 3. OpenRouter (FIXED: updated free model)
     if OR_KEY and not result:
         try:
             res = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
-                json={"model": "meta-llama/llama-3-8b-instruct:free", "messages": [{"role": "user", "content": prompt}]},
+                json={"model": "google/gemini-2.0-flash-exp:free", "messages": [{"role": "user", "content": prompt}]},
                 timeout=15
             )
             if res.status_code == 200:
                 result = res.json()['choices'][0]['message']['content']
                 print("[AI] OpenRouter ✓")
-        except Exception as e: print(f"[AI] OpenRouter ✗: {e}")
+            else:
+                err = f"OpenRouter HTTP {res.status_code}: {res.text[:200]}"
+                errors.append(err)
+                print(f"[AI] {err}")
+        except Exception as e: 
+            err = f"OpenRouter exception: {str(e)}"
+            errors.append(err)
+            print(f"[AI] {err}")
 
-    # 4. HuggingFace
+    # 4. HuggingFace (FIXED: new router + legacy fallback)
     if HF_KEY and not result:
         try:
+            # Try new router first
             res = requests.post(
-                "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2",
+                "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.2",
                 headers={"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"},
-                json={"inputs": f"[INST] {prompt} [/INST]",
-                      "parameters": {"max_new_tokens": 600, "temperature": 0.7, "return_full_text": False}},
+                json={"inputs": f"[INST] {prompt} [/INST]"},
                 timeout=25
             )
             if res.status_code == 200:
                 data = res.json()
                 if isinstance(data, list) and data:
                     result = data[0].get("generated_text", "").strip()
-                if result: print("[AI] HuggingFace ✓")
-        except Exception as e: print(f"[AI] HuggingFace ✗: {e}")
+                if result: 
+                    print("[AI] HuggingFace (new router) ✓")
+            else:
+                # Fallback to legacy endpoint
+                res2 = requests.post(
+                    "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2",
+                    headers={"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"},
+                    json={"inputs": f"[INST] {prompt} [/INST]"},
+                    timeout=25
+                )
+                if res2.status_code == 200:
+                    data = res2.json()
+                    if isinstance(data, list) and data:
+                        result = data[0].get("generated_text", "").strip()
+                    if result: 
+                        print("[AI] HuggingFace (legacy) ✓")
+                else:
+                    err = f"HuggingFace HTTP {res.status_code} (new) / {res2.status_code} (legacy)"
+                    errors.append(err)
+                    print(f"[AI] {err}")
+        except Exception as e: 
+            err = f"HuggingFace exception: {str(e)}"
+            errors.append(err)
+            print(f"[AI] {err}")
 
     if not result:
-        result = "AI services are currently busy. Please try again in a moment."
+        # Return detailed error instead of generic "busy" message
+        error_summary = " | ".join(errors) if errors else "All API keys missing"
+        print(f"[AI] ALL PROVIDERS FAILED: {error_summary}")
+        return f"AI services unavailable. Debug info: {error_summary}"
 
-    if "busy" not in result:
+    if "unavailable" not in result:
         set_cache(prompt, result)
 
     return result
@@ -432,8 +481,6 @@ class UserCreate(BaseModel):
     email:    str
     password: str
 
-# ✅ FIX: Login now uses JSON body — no more URL encoding issues
-# Special characters like @, #, !, % in passwords now work perfectly
 class LoginData(BaseModel):
     username: str
     password: str
@@ -589,7 +636,6 @@ def signup(user: UserCreate, db=Depends(get_db)):
     return {"msg": "Account created successfully! Please login.", "username": new_user.username}
 
 
-# ✅ LOGIN FIXED — uses JSON body, handles ALL special characters in passwords
 @app.post("/login")
 def login(data: LoginData, db=Depends(get_db)):
     username = data.username.strip()
@@ -600,7 +646,6 @@ def login(data: LoginData, db=Depends(get_db)):
     if not username or not password:
         raise HTTPException(400, "Username and password are required")
 
-    # Case-insensitive username lookup
     user = db.query(User).filter(User.username.ilike(username)).first()
 
     if not user:
@@ -718,7 +763,6 @@ def ai_chat(data: AIChatMessage, db=Depends(get_db)):
     user = db.query(User).filter(User.username == data.username).first()
     if not user: raise HTTPException(404, "User not found")
 
-    # Get last 6 messages for context
     history = db.query(AIChatHistory).filter(
         AIChatHistory.user_id == user.id
     ).order_by(AIChatHistory.id.desc()).limit(6).all()
@@ -868,11 +912,10 @@ def smart_quiz(topic: str, level: str = "SSS", subject: str = "General", db=Depe
         return {"topic": topic, "quiz": [], "error": "Could not generate quiz. Please try again.", "source": "ai"}
 
 # ============================================================
-# MANUAL QUIZ BY TOPIC — FETCHES FROM MANUAL_QUESTIONS TABLE
+# MANUAL QUIZ BY TOPIC
 # ============================================================
 @app.get("/quiz/manual/{topic}")
 def get_manual_quiz(topic: str, db=Depends(get_db)):
-    # Find questions matching this topic (case-insensitive)
     questions = db.query(ManualQuestion).filter(
         ManualQuestion.topic.ilike(f"%{topic}%")
     ).all()
@@ -880,7 +923,6 @@ def get_manual_quiz(topic: str, db=Depends(get_db)):
     if not questions:
         return {"error": "No manual questions found for this topic yet. Add them via /admin/add-question"}
     
-    # Format for frontend
     quiz_list = []
     for q in questions:
         quiz_list.append({
@@ -1222,7 +1264,7 @@ def clear_cache():
     return {"msg": "Cache cleared"}
 
 # ============================================================
-# DEBUG — AI PROVIDER STATUS
+# DEBUG — AI PROVIDER STATUS (FIXED: shows detailed errors)
 # ============================================================
 @app.get("/debug/ai")
 def debug_ai():
@@ -1234,60 +1276,88 @@ def debug_ai():
             r = requests.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
-                json={"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": "Say OK"}]},
+                json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": "Say OK"}]},
                 timeout=10
             )
-            results["groq"] = "✅ Working" if r.status_code == 200 else f"❌ Error {r.status_code}: {r.text[:100]}"
+            if r.status_code == 200:
+                results["groq"] = "✅ Working"
+            else:
+                results["groq"] = f"❌ HTTP {r.status_code}: {r.text[:200]}"
         except Exception as e:
-            results["groq"] = f"❌ Failed: {str(e)}"
+            results["groq"] = f"❌ Exception: {str(e)}"
     else:
         results["groq"] = "⚠️ Key not set"
 
-    # Test Gemini
+    # Test Gemini (FIXED: updated model)
     if GEMINI_KEY:
         try:
             r = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
                 json={"contents": [{"parts": [{"text": "Say OK"}]}]},
                 timeout=10
             )
-            results["gemini"] = "✅ Working" if r.status_code == 200 else f"❌ Error {r.status_code}: {r.text[:100]}"
+            if r.status_code == 200:
+                results["gemini"] = "✅ Working"
+            else:
+                results["gemini"] = f"❌ HTTP {r.status_code}: {r.text[:200]}"
         except Exception as e:
-            results["gemini"] = f"❌ Failed: {str(e)}"
+            results["gemini"] = f"❌ Exception: {str(e)}"
     else:
         results["gemini"] = "⚠️ Key not set"
 
-    # Test OpenRouter
+    # Test OpenRouter (FIXED: updated free model)
     if OR_KEY:
         try:
             r = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
-                json={"model": "meta-llama/llama-3-8b-instruct:free", "messages": [{"role": "user", "content": "Say OK"}]},
+                json={"model": "google/gemini-2.0-flash-exp:free", "messages": [{"role": "user", "content": "Say OK"}]},
                 timeout=10
             )
-            results["openrouter"] = "✅ Working" if r.status_code == 200 else f"❌ Error {r.status_code}: {r.text[:100]}"
+            if r.status_code == 200:
+                results["openrouter"] = "✅ Working"
+            else:
+                results["openrouter"] = f"❌ HTTP {r.status_code}: {r.text[:200]}"
         except Exception as e:
-            results["openrouter"] = f"❌ Failed: {str(e)}"
+            results["openrouter"] = f"❌ Exception: {str(e)}"
     else:
         results["openrouter"] = "⚠️ Key not set"
 
-    # Test HuggingFace
+    # Test HuggingFace (FIXED: new router + legacy)
     if HF_KEY:
         try:
             r = requests.post(
-                "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2",
-                headers={"Authorization": f"Bearer {HF_KEY}"},
+                "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.2",
+                headers={"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"},
                 json={"inputs": "[INST] Say OK [/INST]"},
                 timeout=20
             )
-            results["huggingface"] = "✅ Working" if r.status_code == 200 else f"❌ Error {r.status_code}: {r.text[:100]}"
+            if r.status_code == 200:
+                results["huggingface"] = "✅ Working (new router)"
+            else:
+                r2 = requests.post(
+                    "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2",
+                    headers={"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"},
+                    json={"inputs": "[INST] Say OK [/INST]"},
+                    timeout=20
+                )
+                if r2.status_code == 200:
+                    results["huggingface"] = "✅ Working (legacy)"
+                else:
+                    results["huggingface"] = f"❌ New router HTTP {r.status_code}, Legacy HTTP {r2.status_code}"
         except Exception as e:
-            results["huggingface"] = f"❌ Failed: {str(e)}"
+            results["huggingface"] = f"❌ Exception: {str(e)}"
     else:
         results["huggingface"] = "⚠️ Key not set"
 
-    return {"ai_status": results, "cache_size": len(ai_cache)}
+    working = sum(1 for v in results.values() if "✅" in str(v))
+    
+    return {
+        "ai_status": results, 
+        "cache_size": len(ai_cache),
+        "working_providers": working,
+        "total_providers": 4
+    }
 
 # ============================================================
 # TAVILY SEARCH
