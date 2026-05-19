@@ -15,13 +15,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 
 # ============================================================
-# CONFIGURATION
+# CONFIGURATION — 7 AI PROVIDERS
 # ============================================================
 DATABASE_URL       = os.getenv("DATABASE_URL", "postgresql://neondb_owner:npg_UElyr9BSK5OH@ep-bold-hall-aq15g941-pooler.c-8.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require")
 GROQ_KEY           = os.getenv("GROQ_KEY")
 GEMINI_KEY         = os.getenv("GEMINI_KEY")
 OR_KEY             = os.getenv("OPENROUTER_KEY")
 HF_KEY             = os.getenv("HUGGINGFACE_KEY")
+COHERE_KEY         = os.getenv("COHERE_KEY")          # NEW
+MISTRAL_KEY        = os.getenv("MISTRAL_KEY")         # NEW
+DEEPSEEK_KEY       = os.getenv("DEEPSEEK_KEY")        # NEW
 TAVILY_KEY         = os.getenv("TAVILY_API_KEY")
 SECRET_KEY         = os.getenv("SECRET_KEY", "oxbridge_secret_2025")
 TOKEN_EXPIRE_HOURS = 72
@@ -332,7 +335,7 @@ def update_streak(user: User, db):
     db.commit()
 
 # ============================================================
-# HYBRID AI ROUTER — 4 PROVIDERS + CACHE + DETAILED LOGGING
+# HYBRID AI ROUTER — 7 PROVIDERS + CACHE + DETAILED LOGGING
 # ============================================================
 def get_ai_response(prompt: str) -> str:
     cached = get_cached(prompt)
@@ -341,7 +344,7 @@ def get_ai_response(prompt: str) -> str:
         return cached
 
     result = None
-    errors = []  # Track which providers failed and why
+    errors = []
 
     # 1. Groq
     if GROQ_KEY and not result:
@@ -356,15 +359,70 @@ def get_ai_response(prompt: str) -> str:
                 result = res.json()['choices'][0]['message']['content']
                 print("[AI] Groq ✓")
             else:
-                err = f"Groq HTTP {res.status_code}: {res.text[:200]}"
+                err = f"Groq HTTP {res.status_code}: {res.text[:100]}"
                 errors.append(err)
                 print(f"[AI] {err}")
         except Exception as e: 
-            err = f"Groq exception: {str(e)}"
-            errors.append(err)
-            print(f"[AI] {err}")
+            errors.append(f"Groq: {str(e)}")
 
-    # 2. Gemini (FIXED: updated model name)
+    # 2. DeepSeek (NEW)
+    if DEEPSEEK_KEY and not result:
+        try:
+            res = requests.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {DEEPSEEK_KEY}", "Content-Type": "application/json"},
+                json={"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}]},
+                timeout=15
+            )
+            if res.status_code == 200:
+                result = res.json()['choices'][0]['message']['content']
+                print("[AI] DeepSeek ✓")
+            else:
+                err = f"DeepSeek HTTP {res.status_code}: {res.text[:100]}"
+                errors.append(err)
+                print(f"[AI] {err}")
+        except Exception as e: 
+            errors.append(f"DeepSeek: {str(e)}")
+
+    # 3. Mistral AI (NEW)
+    if MISTRAL_KEY and not result:
+        try:
+            res = requests.post(
+                "https://api.mistral.ai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {MISTRAL_KEY}", "Content-Type": "application/json"},
+                json={"model": "mistral-tiny", "messages": [{"role": "user", "content": prompt}]},
+                timeout=15
+            )
+            if res.status_code == 200:
+                result = res.json()['choices'][0]['message']['content']
+                print("[AI] Mistral ✓")
+            else:
+                err = f"Mistral HTTP {res.status_code}: {res.text[:100]}"
+                errors.append(err)
+                print(f"[AI] {err}")
+        except Exception as e: 
+            errors.append(f"Mistral: {str(e)}")
+
+    # 4. Cohere (NEW)
+    if COHERE_KEY and not result:
+        try:
+            res = requests.post(
+                "https://api.cohere.ai/v1/generate",
+                headers={"Authorization": f"Bearer {COHERE_KEY}", "Content-Type": "application/json"},
+                json={"model": "command", "prompt": prompt, "max_tokens": 600, "temperature": 0.7},
+                timeout=15
+            )
+            if res.status_code == 200:
+                result = res.json()['generations'][0]['text']
+                print("[AI] Cohere ✓")
+            else:
+                err = f"Cohere HTTP {res.status_code}: {res.text[:100]}"
+                errors.append(err)
+                print(f"[AI] {err}")
+        except Exception as e: 
+            errors.append(f"Cohere: {str(e)}")
+
+    # 5. Gemini
     if GEMINI_KEY and not result:
         try:
             res = requests.post(
@@ -376,79 +434,65 @@ def get_ai_response(prompt: str) -> str:
                 result = res.json()["candidates"][0]["content"]["parts"][0]["text"]
                 print("[AI] Gemini ✓")
             else:
-                err = f"Gemini HTTP {res.status_code}: {res.text[:200]}"
+                err = f"Gemini HTTP {res.status_code}: {res.text[:100]}"
                 errors.append(err)
                 print(f"[AI] {err}")
         except Exception as e: 
-            err = f"Gemini exception: {str(e)}"
-            errors.append(err)
-            print(f"[AI] {err}")
+            errors.append(f"Gemini: {str(e)}")
 
-    # 3. OpenRouter (FIXED: updated free model)
+    # 6. OpenRouter (multiple free models)
     if OR_KEY and not result:
-        try:
-            res = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
-                json={"model": "google/gemini-2.0-flash-exp:free", "messages": [{"role": "user", "content": prompt}]},
-                timeout=15
-            )
-            if res.status_code == 200:
-                result = res.json()['choices'][0]['message']['content']
-                print("[AI] OpenRouter ✓")
-            else:
-                err = f"OpenRouter HTTP {res.status_code}: {res.text[:200]}"
-                errors.append(err)
-                print(f"[AI] {err}")
-        except Exception as e: 
-            err = f"OpenRouter exception: {str(e)}"
-            errors.append(err)
-            print(f"[AI] {err}")
-
-    # 4. HuggingFace (FIXED: new router + legacy fallback)
-    if HF_KEY and not result:
-        try:
-            # Try new router first
-            res = requests.post(
-                "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.2",
-                headers={"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"},
-                json={"inputs": f"[INST] {prompt} [/INST]"},
-                timeout=25
-            )
-            if res.status_code == 200:
-                data = res.json()
-                if isinstance(data, list) and data:
-                    result = data[0].get("generated_text", "").strip()
-                if result: 
-                    print("[AI] HuggingFace (new router) ✓")
-            else:
-                # Fallback to legacy endpoint
-                res2 = requests.post(
-                    "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2",
-                    headers={"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"},
-                    json={"inputs": f"[INST] {prompt} [/INST]"},
-                    timeout=25
+        free_models = [
+            "meta-llama/llama-3.1-8b-instruct:free",
+            "nousresearch/hermes-3-llama-3.1-405b:free",
+            "gryphe/mythomax-l2-13b:free"
+        ]
+        for model in free_models:
+            try:
+                res = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
+                    json={"model": model, "messages": [{"role": "user", "content": prompt}]},
+                    timeout=15
                 )
-                if res2.status_code == 200:
-                    data = res2.json()
-                    if isinstance(data, list) and data:
-                        result = data[0].get("generated_text", "").strip()
-                    if result: 
-                        print("[AI] HuggingFace (legacy) ✓")
+                if res.status_code == 200:
+                    result = res.json()['choices'][0]['message']['content']
+                    print(f"[AI] OpenRouter ({model}) ✓")
+                    break
                 else:
-                    err = f"HuggingFace HTTP {res.status_code} (new) / {res2.status_code} (legacy)"
-                    errors.append(err)
-                    print(f"[AI] {err}")
-        except Exception as e: 
-            err = f"HuggingFace exception: {str(e)}"
-            errors.append(err)
-            print(f"[AI] {err}")
+                    errors.append(f"OpenRouter {model}: HTTP {res.status_code}")
+            except Exception as e:
+                errors.append(f"OpenRouter {model}: {str(e)}")
+
+    # 7. HuggingFace (multiple models)
+    if HF_KEY and not result:
+        models = [
+            "mistralai/Mistral-7B-Instruct-v0.3",
+            "meta-llama/Llama-2-7b-chat-hf",
+            "google/gemma-2b-it"
+        ]
+        for model in models:
+            try:
+                res = requests.post(
+                    f"https://api-inference.huggingface.co/models/{model}",
+                    headers={"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"},
+                    json={"inputs": f"<s>[INST] {prompt} [/INST]", "parameters": {"max_new_tokens": 600}},
+                    timeout=30
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    if isinstance(data, list) and data:
+                        result = data[0].get("generated_text", "").replace(f"<s>[INST] {prompt} [/INST]", "").strip()
+                    if result:
+                        print(f"[AI] HuggingFace ({model}) ✓")
+                        break
+            except:
+                continue
 
     if not result:
-        # Return detailed error instead of generic "busy" message
-        error_summary = " | ".join(errors) if errors else "All API keys missing"
+        error_summary = " | ".join(errors[-3:]) if errors else "All API keys missing"
         print(f"[AI] ALL PROVIDERS FAILED: {error_summary}")
-        return f"AI services unavailable. Debug info: {error_summary}"
+        return f"AI services unavailable. Debug: {error_summary}"
 
     if "unavailable" not in result:
         set_cache(prompt, result)
@@ -584,7 +628,7 @@ class AIChatHistoryClear(BaseModel):
     username: str
 
 # ============================================================
-# ROOT — supports HEAD for UptimeRobot
+# ROOT
 # ============================================================
 @app.api_route("/", methods=["GET", "HEAD"])
 def root():
@@ -593,12 +637,12 @@ def root():
         "version":     "2.0.0",
         "status":      "running ✅",
         "powered_by":  "Ox-Bridge Technology 🇳🇬",
-        "ai_engines":  ["Groq", "Gemini", "OpenRouter", "HuggingFace"],
+        "ai_engines":  ["Groq", "DeepSeek", "Mistral", "Cohere", "Gemini", "OpenRouter", "HuggingFace"],
         "cache_size":  len(ai_cache)
     }
 
 # ============================================================
-# AUTH — LOGIN FIXED
+# AUTH
 # ============================================================
 @app.post("/signup")
 def signup(user: UserCreate, db=Depends(get_db)):
@@ -635,7 +679,6 @@ def signup(user: UserCreate, db=Depends(get_db)):
 
     return {"msg": "Account created successfully! Please login.", "username": new_user.username}
 
-
 @app.post("/login")
 def login(data: LoginData, db=Depends(get_db)):
     username = data.username.strip()
@@ -668,7 +711,6 @@ def login(data: LoginData, db=Depends(get_db)):
         "coins":        user.coins          or 0,
         "expires_in":   f"{TOKEN_EXPIRE_HOURS} hours"
     }
-
 
 @app.post("/validate-token")
 def validate_token(data: TokenValidate, db=Depends(get_db)):
@@ -1002,7 +1044,9 @@ def add_past_question(data: PastQuestionCreate, db=Depends(get_db)):
 @app.get("/past-questions/{exam_type}/{subject}")
 def get_past_questions(exam_type: str, subject: str, year: int = None, db=Depends(get_db)):
     query = db.query(PastQuestion).filter(
-        PastQuestion.exam_type == exam_type.upper(), PastQuestion.subject == subject)
+        PastQuestion.exam_type.ilike(f"%{exam_type}%"),
+        PastQuestion.subject.ilike(f"%{subject}%")
+    )
     if year: query = query.filter(PastQuestion.year == year)
     return [{"id": q.id, "year": q.year, "question_text": q.question_text,
              "option_a": q.option_a, "option_b": q.option_b,
@@ -1013,13 +1057,11 @@ def get_past_questions(exam_type: str, subject: str, year: int = None, db=Depend
 @app.get("/past-questions/random/{subject}")
 def random_past_question(subject: str, exam: str = "WAEC", db=Depends(get_db)):
     questions = db.query(PastQuestion).filter(
-        PastQuestion.exam_type == exam.upper(), PastQuestion.subject == subject).all()
+        PastQuestion.exam_type.ilike(f"%{exam}%"),
+        PastQuestion.subject.ilike(f"%{subject}%")
+    ).all()
     if not questions:
-        prompt = f"""Generate 1 {exam} past question MCQ for {subject} (Nigerian curriculum).
-        Return ONLY JSON: {{"question_text":"...","option_a":"...","option_b":"...","option_c":"...","option_d":"...","correct_answer":"A","explanation":"..."}}"""
-        raw = get_ai_response(prompt)
-        try: return {"source": "ai_generated", "question": json.loads(raw.replace("```json","").replace("```","").strip())}
-        except: return {"error": "No questions found"}
+        return {"source": "database", "question": None}
     q = random.choice(questions)
     return {"source": "database", "question": {
         "id": q.id, "year": q.year, "question_text": q.question_text,
@@ -1264,99 +1306,89 @@ def clear_cache():
     return {"msg": "Cache cleared"}
 
 # ============================================================
-# DEBUG — AI PROVIDER STATUS (FIXED: shows detailed errors)
+# DEBUG — AI PROVIDER STATUS (7 PROVIDERS)
 # ============================================================
 @app.get("/debug/ai")
 def debug_ai():
     results = {}
     
-    # Test Groq
-    if GROQ_KEY:
+    providers = [
+        ("groq", GROQ_KEY, "https://api.groq.com/openai/v1/chat/completions", 
+         {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": "Say OK"}]}),
+        ("deepseek", DEEPSEEK_KEY, "https://api.deepseek.com/v1/chat/completions",
+         {"model": "deepseek-chat", "messages": [{"role": "user", "content": "Say OK"}]}),
+        ("mistral", MISTRAL_KEY, "https://api.mistral.ai/v1/chat/completions",
+         {"model": "mistral-tiny", "messages": [{"role": "user", "content": "Say OK"}]}),
+        ("cohere", COHERE_KEY, "https://api.cohere.ai/v1/generate",
+         {"model": "command", "prompt": "Say OK", "max_tokens": 10}),
+        ("gemini", GEMINI_KEY, f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
+         {"contents": [{"parts": [{"text": "Say OK"}]}]}),
+    ]
+    
+    for name, key, url, payload in providers:
+        if not key:
+            results[name] = "⚠️ Key not set"
+            continue
         try:
-            r = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
-                json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": "Say OK"}]},
-                timeout=10
-            )
+            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            if name == "gemini":
+                headers = {"Content-Type": "application/json"}
+            
+            r = requests.post(url, headers=headers, json=payload, timeout=10)
+            
             if r.status_code == 200:
-                results["groq"] = "✅ Working"
+                results[name] = "✅ Working"
+            elif r.status_code == 429:
+                results[name] = "⏳ Rate limited"
             else:
-                results["groq"] = f"❌ HTTP {r.status_code}: {r.text[:200]}"
+                results[name] = f"❌ HTTP {r.status_code}: {r.text[:100]}"
         except Exception as e:
-            results["groq"] = f"❌ Exception: {str(e)}"
-    else:
-        results["groq"] = "⚠️ Key not set"
-
-    # Test Gemini (FIXED: updated model)
-    if GEMINI_KEY:
-        try:
-            r = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
-                json={"contents": [{"parts": [{"text": "Say OK"}]}]},
-                timeout=10
-            )
-            if r.status_code == 200:
-                results["gemini"] = "✅ Working"
-            else:
-                results["gemini"] = f"❌ HTTP {r.status_code}: {r.text[:200]}"
-        except Exception as e:
-            results["gemini"] = f"❌ Exception: {str(e)}"
-    else:
-        results["gemini"] = "⚠️ Key not set"
-
-    # Test OpenRouter (FIXED: updated free model)
+            results[name] = f"❌ Exception: {str(e)[:100]}"
+    
+    # Test OpenRouter
     if OR_KEY:
         try:
             r = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
-                json={"model": "google/gemini-2.0-flash-exp:free", "messages": [{"role": "user", "content": "Say OK"}]},
+                json={"model": "meta-llama/llama-3.1-8b-instruct:free", "messages": [{"role": "user", "content": "Say OK"}]},
                 timeout=10
             )
             if r.status_code == 200:
                 results["openrouter"] = "✅ Working"
             else:
-                results["openrouter"] = f"❌ HTTP {r.status_code}: {r.text[:200]}"
+                results["openrouter"] = f"❌ HTTP {r.status_code}: {r.text[:100]}"
         except Exception as e:
-            results["openrouter"] = f"❌ Exception: {str(e)}"
+            results["openrouter"] = f"❌ Exception: {str(e)[:100]}"
     else:
         results["openrouter"] = "⚠️ Key not set"
-
-    # Test HuggingFace (FIXED: new router + legacy)
+    
+    # Test HuggingFace
     if HF_KEY:
         try:
             r = requests.post(
-                "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.2",
+                "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3",
                 headers={"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"},
-                json={"inputs": "[INST] Say OK [/INST]"},
+                json={"inputs": "Say OK"},
                 timeout=20
             )
             if r.status_code == 200:
-                results["huggingface"] = "✅ Working (new router)"
+                results["huggingface"] = "✅ Working"
             else:
-                r2 = requests.post(
-                    "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2",
-                    headers={"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"},
-                    json={"inputs": "[INST] Say OK [/INST]"},
-                    timeout=20
-                )
-                if r2.status_code == 200:
-                    results["huggingface"] = "✅ Working (legacy)"
-                else:
-                    results["huggingface"] = f"❌ New router HTTP {r.status_code}, Legacy HTTP {r2.status_code}"
+                results["huggingface"] = f"❌ HTTP {r.status_code}"
         except Exception as e:
-            results["huggingface"] = f"❌ Exception: {str(e)}"
+            results["huggingface"] = f"❌ Exception: {str(e)[:100]}"
     else:
         results["huggingface"] = "⚠️ Key not set"
-
+    
     working = sum(1 for v in results.values() if "✅" in str(v))
     
     return {
-        "ai_status": results, 
+        "ai_status": results,
         "cache_size": len(ai_cache),
         "working_providers": working,
-        "total_providers": 4
+        "total_providers": 7,
+        "recommendation": "Get free keys: DeepSeek (deepseek.com), Mistral (console.mistral.ai), Cohere (cohere.com)"
     }
 
 # ============================================================
