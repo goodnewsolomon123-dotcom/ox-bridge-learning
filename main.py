@@ -868,6 +868,39 @@ def smart_quiz(topic: str, level: str = "SSS", subject: str = "General", db=Depe
         return {"topic": topic, "quiz": [], "error": "Could not generate quiz. Please try again.", "source": "ai"}
 
 # ============================================================
+# MANUAL QUIZ BY TOPIC — FETCHES FROM MANUAL_QUESTIONS TABLE
+# ============================================================
+@app.get("/quiz/manual/{topic}")
+def get_manual_quiz(topic: str, db=Depends(get_db)):
+    # Find questions matching this topic (case-insensitive)
+    questions = db.query(ManualQuestion).filter(
+        ManualQuestion.topic.ilike(f"%{topic}%")
+    ).all()
+    
+    if not questions:
+        return {"error": "No manual questions found for this topic yet. Add them via /admin/add-question"}
+    
+    # Format for frontend
+    quiz_list = []
+    for q in questions:
+        quiz_list.append({
+            "id": q.id,
+            "question": q.question_text,
+            "options": [f"A) {q.option_a}", f"B) {q.option_b}", f"C) {q.option_c}", f"D) {q.option_d}"],
+            "answer": q.correct_answer,
+            "explanation": q.explanation,
+            "subject": q.subject,
+            "level": q.level
+        })
+        
+    return {
+        "topic": topic,
+        "quiz": quiz_list,
+        "total": len(quiz_list),
+        "source": "manual_database"
+    }
+
+# ============================================================
 # QUIZ SCORE TRACKING
 # ============================================================
 @app.post("/quiz/save-result")
@@ -1187,6 +1220,74 @@ def cache_status():
 def clear_cache():
     ai_cache.clear()
     return {"msg": "Cache cleared"}
+
+# ============================================================
+# DEBUG — AI PROVIDER STATUS
+# ============================================================
+@app.get("/debug/ai")
+def debug_ai():
+    results = {}
+    
+    # Test Groq
+    if GROQ_KEY:
+        try:
+            r = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+                json={"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": "Say OK"}]},
+                timeout=10
+            )
+            results["groq"] = "✅ Working" if r.status_code == 200 else f"❌ Error {r.status_code}: {r.text[:100]}"
+        except Exception as e:
+            results["groq"] = f"❌ Failed: {str(e)}"
+    else:
+        results["groq"] = "⚠️ Key not set"
+
+    # Test Gemini
+    if GEMINI_KEY:
+        try:
+            r = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
+                json={"contents": [{"parts": [{"text": "Say OK"}]}]},
+                timeout=10
+            )
+            results["gemini"] = "✅ Working" if r.status_code == 200 else f"❌ Error {r.status_code}: {r.text[:100]}"
+        except Exception as e:
+            results["gemini"] = f"❌ Failed: {str(e)}"
+    else:
+        results["gemini"] = "⚠️ Key not set"
+
+    # Test OpenRouter
+    if OR_KEY:
+        try:
+            r = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
+                json={"model": "meta-llama/llama-3-8b-instruct:free", "messages": [{"role": "user", "content": "Say OK"}]},
+                timeout=10
+            )
+            results["openrouter"] = "✅ Working" if r.status_code == 200 else f"❌ Error {r.status_code}: {r.text[:100]}"
+        except Exception as e:
+            results["openrouter"] = f"❌ Failed: {str(e)}"
+    else:
+        results["openrouter"] = "⚠️ Key not set"
+
+    # Test HuggingFace
+    if HF_KEY:
+        try:
+            r = requests.post(
+                "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2",
+                headers={"Authorization": f"Bearer {HF_KEY}"},
+                json={"inputs": "[INST] Say OK [/INST]"},
+                timeout=20
+            )
+            results["huggingface"] = "✅ Working" if r.status_code == 200 else f"❌ Error {r.status_code}: {r.text[:100]}"
+        except Exception as e:
+            results["huggingface"] = f"❌ Failed: {str(e)}"
+    else:
+        results["huggingface"] = "⚠️ Key not set"
+
+    return {"ai_status": results, "cache_size": len(ai_cache)}
 
 # ============================================================
 # TAVILY SEARCH
