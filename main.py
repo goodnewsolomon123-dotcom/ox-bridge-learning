@@ -440,13 +440,15 @@ def get_ai_response(prompt: str) -> str:
         except Exception as e: 
             errors.append(f"Gemini: {str(e)}")
 
-    # 6. OpenRouter (multiple free models)
+            # 6. OpenRouter (multiple free models)
     if OR_KEY and not result:
         free_models = [
             "mistralai/mistral-7b-instruct:free",
-            "mistralai/mistral-7b-instruct:free",
-            "gryphe/mythomax-l2-13b:free"
+            "deepseek/deepseek-r1:free",
+            "google/gemini-2.5-flash:free"
         ]
+
+
         for model in free_models:
             try:
                 res = requests.post(
