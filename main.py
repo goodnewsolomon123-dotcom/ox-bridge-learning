@@ -22,9 +22,9 @@ GROQ_KEY           = os.getenv("GROQ_KEY")
 GEMINI_KEY         = os.getenv("GEMINI_KEY")
 OR_KEY             = os.getenv("OPENROUTER_KEY")
 HF_KEY             = os.getenv("HUGGINGFACE_KEY")
-COHERE_KEY         = os.getenv("COHERE_KEY")          # NEW
-MISTRAL_KEY        = os.getenv("MISTRAL_KEY")         # NEW
-DEEPSEEK_KEY       = os.getenv("DEEPSEEK_KEY")        # NEW
+COHERE_KEY         = os.getenv("COHERE_KEY")          
+MISTRAL_KEY        = os.getenv("MISTRAL_KEY")         
+DEEPSEEK_KEY       = os.getenv("DEEPSEEK_KEY")        
 TAVILY_KEY         = os.getenv("TAVILY_API_KEY")
 SECRET_KEY         = os.getenv("SECRET_KEY", "oxbridge_secret_2025")
 TOKEN_EXPIRE_HOURS = 72
@@ -365,7 +365,7 @@ def get_ai_response(prompt: str) -> str:
         except Exception as e: 
             errors.append(f"Groq: {str(e)}")
 
-    # 2. DeepSeek (NEW)
+    # 2. DeepSeek
     if DEEPSEEK_KEY and not result:
         try:
             res = requests.post(
@@ -384,7 +384,7 @@ def get_ai_response(prompt: str) -> str:
         except Exception as e: 
             errors.append(f"DeepSeek: {str(e)}")
 
-    # 3. Mistral AI (NEW)
+    # 3. Mistral AI
     if MISTRAL_KEY and not result:
         try:
             res = requests.post(
@@ -403,13 +403,13 @@ def get_ai_response(prompt: str) -> str:
         except Exception as e: 
             errors.append(f"Mistral: {str(e)}")
 
-    # 4. Cohere (FIXED: legacy /v1/generate path changed to working /v1/chat endpoint structure)
+    # 4. Cohere (FIXED: Payload parameter updated to use an active model 'command-r')
     if COHERE_KEY and not result:
         try:
             res = requests.post(
                 "https://api.cohere.ai/v1/chat",
                 headers={"Authorization": f"Bearer {COHERE_KEY}", "Content-Type": "application/json"},
-                json={"model": "command", "message": prompt},
+                json={"model": "command-r", "message": prompt},
                 timeout=15
             )
             if res.status_code == 200:
@@ -426,7 +426,7 @@ def get_ai_response(prompt: str) -> str:
     if GEMINI_KEY and not result:
         try:
             res = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}",
                 json={"contents": [{"parts": [{"text": prompt}]}]},
                 timeout=15
             )
@@ -440,9 +440,9 @@ def get_ai_response(prompt: str) -> str:
         except Exception as e: 
             errors.append(f"Gemini: {str(e)}")
 
-    # 6. OpenRouter (FIXED: updated model targets list exactly as requested)
+    # 6. OpenRouter (FIXED: Using real, working active free IDs to avoid 404)
     if OR_KEY and not result:
-        free_models = ["openrouter/free", "google/gemini-2.5-flash:free", "deepseek/deepseek-r1:free"]
+        free_models = ["openrouter/free", "deepseek/deepseek-v4-flash:free", "google/gemini-2.5-flash"]
 
         for model in free_models:
             try:
@@ -461,28 +461,28 @@ def get_ai_response(prompt: str) -> str:
             except Exception as e:
                 errors.append(f"OpenRouter {model}: {str(e)}")
 
-    # 7. HuggingFace (FIXED: replaced paths with the target "meta-llama/Llama-3-8B-Instruct" serverless deployment path)
+    # 7. HuggingFace (FIXED: Improved configuration headers and fallback structure)
     if HF_KEY and not result:
-        models = [
-            "meta-llama/Llama-3-8B-Instruct"
-        ]
+        models = ["meta-llama/Llama-3-8B-Instruct"]
         for model in models:
             try:
                 res = requests.post(
                     f"https://api-inference.huggingface.co/models/{model}",
-                    headers={"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"},
-                    json={"inputs": f"<s>[INST] {prompt} [/INST]", "parameters": {"max_new_tokens": 600}},
-                    timeout=30
+                    headers={"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json", "Connection": "close"},
+                    json={"inputs": prompt, "parameters": {"max_new_tokens": 500}},
+                    timeout=15
                 )
                 if res.status_code == 200:
                     data = res.json()
                     if isinstance(data, list) and data:
-                        result = data[0].get("generated_text", "").replace(f"<s>[INST] {prompt} [/INST]", "").strip()
+                        result = data[0].get("generated_text", "").replace(prompt, "").strip()
+                    elif isinstance(data, dict) and "generated_text" in data:
+                        result = data["generated_text"].strip()
                     if result:
                         print(f"[AI] HuggingFace ({model}) ✓")
                         break
-            except:
-                continue
+            except Exception as e:
+                errors.append(f"HuggingFace: {str(e)}")
 
     if not result:
         error_summary = " | ".join(errors[-3:]) if errors else "All API keys missing"
@@ -740,7 +740,7 @@ def get_profile(username: str, db=Depends(get_db)):
         "bio":         user.bio,
         "profile_pic": user.profile_pic,
         "score":       user.progress_score or 0,
-        "streak":      user.study_streak   or 0,
+        "streak":      user.study_streak or 0,
         "coins":       user.coins          or 0,
         "last_topic":  user.last_learned_topic,
         "quiz_count":  db.query(QuizResult).filter(QuizResult.user_id == user.id).count(),
@@ -1073,8 +1073,7 @@ def get_daily_challenge(db=Depends(get_db)):
     existing = db.query(DailyChallenge).filter(DailyChallenge.date == today).first()
     if not existing:
         subjects = ["Mathematics","English Language","Biology","Physics","Chemistry","Government","Economics"]
-        prompt   = f"""Generate 1 multiple-choice question about {random.choice(subjects)} for Nigerian secondary school students.
-        Return ONLY JSON: {{"question_text":"...","option_a":"...","option_b":"...","option_c":"...","option_d":"...","correct_answer":"A"}}"""
+        prompt   = f"Generate 1 multiple-choice question about {random.choice(subjects)} for Nigerian secondary school students. Return ONLY JSON: {{\x22question_text\x22:\x22...\x22,\x22option_a\x22:\x22...\x22,\x22option_b\x22:\x22...\x22,\x22option_c\x22:\x22...\x22,\x22option_d\x22:\x22...\x22,\x22correct_answer\x22:\x22A\x22}}"
         raw = get_ai_response(prompt)
         try:
             q        = json.loads(raw.replace("```json","").replace("```","").strip())
@@ -1205,29 +1204,25 @@ def check_answer(data: AnswerCheckRequest):
 # ============================================================
 @app.get("/games/word-scramble/{subject}")
 def word_scramble(subject: str, level: str = "Primary"):
-    raw = get_ai_response(f"""1 educational word for {subject} ({level}, Nigerian curriculum).
-    ONLY JSON: {{"word":"...","scrambled":"...","hint":"...","meaning":"..."}}""")
+    raw = get_ai_response(f"1 educational word for {subject} ({level}, Nigerian curriculum). ONLY JSON: {{\x22word\x22:\x22...\x22,\x22scrambled\x22:\x22...\x22,\x22hint\x22:\x22...\x22,\x22meaning\x22:\x22...\x22}}")
     try: return json.loads(raw.replace("```json","").replace("```","").strip())
     except: return {"error": "Could not generate"}
 
 @app.get("/games/spell-challenge/{level}")
 def spell_challenge(level: str):
-    raw = get_ai_response(f"""1 spelling word for Nigerian {level} student.
-    ONLY JSON: {{"word":"...","hint":"...","example_sentence":"...","difficulty":"easy/medium/hard"}}""")
+    raw = get_ai_response(f"1 spelling word for Nigerian {level} student. ONLY JSON: {{\x22word\x22:\x22...\x22,\x22hint\x22:\x22...\x22,\x22example_sentence\x22:\x22...\x22,\x22difficulty\x22:\x22easy/medium/hard\x22}}")
     try: return json.loads(raw.replace("```json","").replace("```","").strip())
     except: return {"error": "Could not generate"}
 
 @app.get("/games/math-challenge/{level}")
 def math_challenge(level: str):
-    raw = get_ai_response(f"""1 math problem for Nigerian {level} student.
-    ONLY JSON: {{"question":"...","answer":"...","solution_steps":"...","difficulty":"easy/medium/hard"}}""")
+    raw = get_ai_response(f"1 math problem for Nigerian {level} student. ONLY JSON: {{\x22question\x22:\x22...\x22,\x22answer\x22:\x22...\x22,\x22solution_steps\x22:\x22...\x22,\x22difficulty\x22:\x22easy/medium/hard\x22}}")
     try: return json.loads(raw.replace("```json","").replace("```","").strip())
     except: return {"error": "Could not generate"}
 
 @app.get("/games/treasure-hunt/{level}")
 def treasure_hunt(level: str, subject: str = "General"):
-    raw = get_ai_response(f"""Educational treasure hunt for Nigerian {level} student about {subject}.
-    ONLY JSON: {{"clue":"...","question":"...","answer":"...","reward_coins":5,"fun_fact":"..."}}""")
+    raw = get_ai_response(f"Educational treasure hunt for Nigerian {level} student about {subject}. ONLY JSON: {{\x22clue\x22:\x22...\x22,\x22question\x22:\x22...\x22,\x22answer\x22:\x22...\x22,\x22reward_coins\x22:5,\x22fun_fact\x22:\x22...\x22}}")
     try: return json.loads(raw.replace("```json","").replace("```","").strip())
     except: return {"error": "Could not generate"}
 
@@ -1315,8 +1310,8 @@ def debug_ai():
         ("mistral", MISTRAL_KEY, "https://api.mistral.ai/v1/chat/completions",
          {"model": "mistral-tiny", "messages": [{"role": "user", "content": "Say OK"}]}),
         ("cohere", COHERE_KEY, "https://api.cohere.ai/v1/chat",
-         {"model": "command", "message": "Say OK"}),
-        ("gemini", GEMINI_KEY, f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
+         {"model": "command-r", "message": "Say OK"}),
+        ("gemini", GEMINI_KEY, f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}",
          {"contents": [{"parts": [{"text": "Say OK"}]}]}),
     ]
     
@@ -1346,7 +1341,7 @@ def debug_ai():
             r = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
-                json={"model": "google/gemini-2.5-flash:free", "messages": [{"role": "user", "content": "Say OK"}]},
+                json={"model": "openrouter/free", "messages": [{"role": "user", "content": "Say OK"}]},
                 timeout=10
             )
             if r.status_code == 200:
@@ -1365,7 +1360,7 @@ def debug_ai():
                 "https://api-inference.huggingface.co/models/meta-llama/Llama-3-8B-Instruct",
                 headers={"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"},
                 json={"inputs": "Say OK"},
-                timeout=20
+                timeout=15
             )
             if r.status_code == 200:
                 results["huggingface"] = "✅ Working"
