@@ -449,9 +449,6 @@ if OR_KEY and not result:
         "openai/gpt-oss-20b",                       # 4. Backup: Low-latency fast model
         "google/gemma-4-31b:free"                   # 5. Backup: Reliable multi-task Google model
     ]
-
-
-
         for model in free_models:
             try:
                 res = requests.post(
