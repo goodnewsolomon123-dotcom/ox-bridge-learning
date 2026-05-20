@@ -444,7 +444,7 @@ def get_ai_response(prompt: str) -> str:
     if OR_KEY and not result:
         free_models = [
             "mistralai/mistral-7b-instruct:free",
-            "nousresearch/hermes-3-llama-3.1-405b:free",
+            "mistralai/mistral-7b-instruct:free",
             "gryphe/mythomax-l2-13b:free"
         ]
         for model in free_models:
