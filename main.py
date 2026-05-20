@@ -440,13 +440,16 @@ def get_ai_response(prompt: str) -> str:
         except Exception as e: 
             errors.append(f"Gemini: {str(e)}")
 
-            # 6. OpenRouter (multiple free models)
-    if OR_KEY and not result:
-        free_models = [
-            "mistralai/mistral-7b-instruct:free",
-            "deepseek/deepseek-r1:free",
-            "google/gemini-2.5-flash:free"
-        ]
+            # 6. # 6. OpenRouter (multiple free models)
+if OR_KEY and not result:
+    free_models = [
+        "openrouter/free",                          # 1. Primary choice: Dynamic router (never 404s)
+        "openai/gpt-oss-120b",                      # 2. Backup: High-tier open MoE model by OpenAI
+        "nvidia/nemotron-3-super-120b-a12b:free",   # 3. Backup: Massive reasoning model
+        "openai/gpt-oss-20b",                       # 4. Backup: Low-latency fast model
+        "google/gemma-4-31b:free"                   # 5. Backup: Reliable multi-task Google model
+    ]
+
 
 
         for model in free_models:
