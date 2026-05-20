@@ -403,17 +403,17 @@ def get_ai_response(prompt: str) -> str:
         except Exception as e: 
             errors.append(f"Mistral: {str(e)}")
 
-    # 4. Cohere (NEW)
+    # 4. Cohere (FIXED: legacy /v1/generate path changed to working /v1/chat endpoint structure)
     if COHERE_KEY and not result:
         try:
             res = requests.post(
-                "https://api.cohere.ai/v1/generate",
+                "https://api.cohere.ai/v1/chat",
                 headers={"Authorization": f"Bearer {COHERE_KEY}", "Content-Type": "application/json"},
-                json={"model": "command", "prompt": prompt, "max_tokens": 600, "temperature": 0.7},
+                json={"model": "command", "message": prompt},
                 timeout=15
             )
             if res.status_code == 200:
-                result = res.json()['generations'][0]['text']
+                result = res.json()['text']
                 print("[AI] Cohere ✓")
             else:
                 err = f"Cohere HTTP {res.status_code}: {res.text[:100]}"
@@ -440,14 +440,9 @@ def get_ai_response(prompt: str) -> str:
         except Exception as e: 
             errors.append(f"Gemini: {str(e)}")
 
-            # 6. OpenRouter (multiple free models)
+    # 6. OpenRouter (FIXED: updated model targets list exactly as requested)
     if OR_KEY and not result:
-        free_models = [
-            "mistralai/mistral-7b-instruct:free",
-            "deepseek/deepseek-r1:free",
-            "google/gemini-2.5-flash:free"
-        ]
-
+        free_models = ["openrouter/free", "google/gemini-2.5-flash:free", "deepseek/deepseek-r1:free"]
 
         for model in free_models:
             try:
@@ -466,12 +461,10 @@ def get_ai_response(prompt: str) -> str:
             except Exception as e:
                 errors.append(f"OpenRouter {model}: {str(e)}")
 
-    # 7. HuggingFace (multiple models)
+    # 7. HuggingFace (FIXED: replaced paths with the target "meta-llama/Llama-3-8B-Instruct" serverless deployment path)
     if HF_KEY and not result:
         models = [
-            "mistralai/Mistral-7B-Instruct-v0.3",
-            "meta-llama/Llama-2-7b-chat-hf",
-            "google/gemma-2b-it"
+            "meta-llama/Llama-3-8B-Instruct"
         ]
         for model in models:
             try:
@@ -1321,8 +1314,8 @@ def debug_ai():
          {"model": "deepseek-chat", "messages": [{"role": "user", "content": "Say OK"}]}),
         ("mistral", MISTRAL_KEY, "https://api.mistral.ai/v1/chat/completions",
          {"model": "mistral-tiny", "messages": [{"role": "user", "content": "Say OK"}]}),
-        ("cohere", COHERE_KEY, "https://api.cohere.ai/v1/generate",
-         {"model": "command", "prompt": "Say OK", "max_tokens": 10}),
+        ("cohere", COHERE_KEY, "https://api.cohere.ai/v1/chat",
+         {"model": "command", "message": "Say OK"}),
         ("gemini", GEMINI_KEY, f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
          {"contents": [{"parts": [{"text": "Say OK"}]}]}),
     ]
@@ -1353,7 +1346,7 @@ def debug_ai():
             r = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
-                json={"model": "meta-llama/llama-3.1-8b-instruct:free", "messages": [{"role": "user", "content": "Say OK"}]},
+                json={"model": "google/gemini-2.5-flash:free", "messages": [{"role": "user", "content": "Say OK"}]},
                 timeout=10
             )
             if r.status_code == 200:
@@ -1369,7 +1362,7 @@ def debug_ai():
     if HF_KEY:
         try:
             r = requests.post(
-                "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3",
+                "https://api-inference.huggingface.co/models/meta-llama/Llama-3-8B-Instruct",
                 headers={"Authorization": f"Bearer {HF_KEY}", "Content-Type": "application/json"},
                 json={"inputs": "Say OK"},
                 timeout=20
