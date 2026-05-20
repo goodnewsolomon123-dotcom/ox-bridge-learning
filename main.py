@@ -443,7 +443,7 @@ def get_ai_response(prompt: str) -> str:
     # 6. OpenRouter (multiple free models)
     if OR_KEY and not result:
         free_models = [
-            "meta-llama/llama-3.1-8b-instruct:free",
+            "mistralai/mistral-7b-instruct:free",
             "nousresearch/hermes-3-llama-3.1-405b:free",
             "gryphe/mythomax-l2-13b:free"
         ]
