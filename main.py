@@ -99,9 +99,12 @@ class Subject(Base):
 
 class Topic(Base):
     __tablename__ = "topics"
-    id         = Column(Integer, primary_key=True, index=True)
-    title      = Column(String)
-    subject_id = Column(Integer, ForeignKey("subjects.id"))
+    id           = Column(Integer, primary_key=True, index=True)
+    title        = Column(String)
+    subject_id   = Column(Integer, ForeignKey("subjects.id"))
+    image_url    = Column(String, nullable=True)   # admin-uploaded diagram/image for this topic
+    admin_notes  = Column(String, nullable=True)   # admin's own short question/explanation (optional override/addition)
+    created_at   = Column(String, nullable=True)
 
 class ManualQuestion(Base):
     __tablename__ = "manual_questions"
@@ -219,6 +222,14 @@ class AIChatHistory(Base):
     message    = Column(String)
     created_at = Column(String)
 
+class ActivityLog(Base):
+    __tablename__ = "activity_logs"
+    id         = Column(Integer, primary_key=True, index=True)
+    username   = Column(String, nullable=True, index=True)
+    action     = Column(String)          # e.g. "login", "ai_chat", "quiz_submit", "theory_view"
+    path       = Column(String, nullable=True)
+    created_at = Column(String, index=True)
+
 # ============================================================
 # CREATE TABLES + MIGRATIONS
 # ============================================================
@@ -243,6 +254,9 @@ def run_migrations():
         "ALTER TABLE manual_questions ADD COLUMN IF NOT EXISTS created_at VARCHAR;",
         "ALTER TABLE manual_questions ADD COLUMN IF NOT EXISTS explanation VARCHAR;",
         "ALTER TABLE manual_questions ADD COLUMN IF NOT EXISTS topic VARCHAR;",
+        "ALTER TABLE topics ADD COLUMN IF NOT EXISTS image_url VARCHAR;",
+        "ALTER TABLE topics ADD COLUMN IF NOT EXISTS admin_notes VARCHAR;",
+        "ALTER TABLE topics ADD COLUMN IF NOT EXISTS created_at VARCHAR;",
     ]
     try:
         with engine.connect() as conn:
@@ -513,6 +527,42 @@ def get_db():
     finally: db.close()
 
 # ============================================================
+# LIGHTWEIGHT ACTIVITY LOGGER (for admin monitoring)
+# Logs a small set of meaningful actions. Fails silently so it
+# can never break an existing request.
+# ============================================================
+LOGGED_PATH_PREFIXES = {
+    "/login": "login", "/signup": "signup", "/ai/chat": "ai_chat",
+    "/quiz/save-result": "quiz_submit", "/theory/": "theory_view",
+    "/games/save-score": "game_played", "/search/web/": "web_search",
+}
+
+@app.middleware("http")
+async def log_activity_middleware(request, call_next):
+    username_from_body = None
+    try:
+        if request.method == "POST":
+            body = await request.body()
+            if body:
+                parsed = json.loads(body)
+                username_from_body = parsed.get("username")
+    except Exception:
+        pass
+    response = await call_next(request)
+    try:
+        path = request.url.path
+        action = next((v for k, v in LOGGED_PATH_PREFIXES.items() if path.startswith(k)), None)
+        if action:
+            username = username_from_body or request.query_params.get("username")
+            db = SessionLocal()
+            db.add(ActivityLog(username=username, action=action, path=path, created_at=now_str()))
+            db.commit()
+            db.close()
+    except Exception as e:
+        print(f"[ACTIVITY LOG ERROR] {e}")
+    return response
+
+# ============================================================
 # PYDANTIC SCHEMAS
 # ============================================================
 class UserCreate(BaseModel):
@@ -612,6 +662,10 @@ class SubjectCreate(BaseModel):
 class TopicCreate(BaseModel):
     title:      str
     subject_id: int
+
+class TopicAttach(BaseModel):
+    image_url:   Optional[str] = None
+    admin_notes: Optional[str] = None
 
 class AIChatMessage(BaseModel):
     username: str
@@ -1280,8 +1334,150 @@ def add_subject(data: SubjectCreate, db=Depends(get_db)):
 
 @app.post("/admin/add-topic")
 def add_topic(data: TopicCreate, db=Depends(get_db)):
-    t = Topic(title=data.title, subject_id=data.subject_id); db.add(t); db.commit()
+    t = Topic(title=data.title, subject_id=data.subject_id, created_at=now_str()); db.add(t); db.commit()
     return {"id": t.id, "msg": "Topic added"}
+
+@app.delete("/admin/subject/{subject_id}")
+def delete_subject(subject_id: int, db=Depends(get_db)):
+    s = db.query(Subject).filter(Subject.id == subject_id).first()
+    if not s: raise HTTPException(404, "Subject not found")
+    db.query(Topic).filter(Topic.subject_id == subject_id).delete()
+    db.delete(s); db.commit()
+    return {"msg": "Subject and its topics deleted"}
+
+@app.delete("/admin/topic/{topic_id}")
+def delete_topic(topic_id: int, db=Depends(get_db)):
+    t = db.query(Topic).filter(Topic.id == topic_id).first()
+    if not t: raise HTTPException(404, "Topic not found")
+    db.delete(t); db.commit()
+    return {"msg": "Topic deleted"}
+
+@app.post("/admin/topic/{topic_id}/attach")
+def attach_topic_media(topic_id: int, data: TopicAttach, db=Depends(get_db)):
+    """Admin attaches an image (e.g. base64 or hosted URL) and/or a short
+    custom note/question to a theory topic. Both fields are optional —
+    send only what you want to set."""
+    t = db.query(Topic).filter(Topic.id == topic_id).first()
+    if not t: raise HTTPException(404, "Topic not found")
+    if data.image_url   is not None: t.image_url   = data.image_url
+    if data.admin_notes is not None: t.admin_notes = data.admin_notes
+    db.commit()
+    return {"msg": "Topic updated", "topic_id": t.id, "has_image": bool(t.image_url)}
+
+# ============================================================
+# THEORY — SUBJECTS, TOPICS, AI-GENERATED BREAKDOWN
+# ============================================================
+@app.get("/subjects")
+def list_subjects(level: str = None, db=Depends(get_db)):
+    query = db.query(Subject)
+    if level: query = query.filter(Subject.level.ilike(f"%{level}%"))
+    subjects = query.all()
+    return [{"id": s.id, "name": s.name, "level": s.level} for s in subjects]
+
+@app.get("/subjects/{subject_id}/topics")
+def list_topics_for_subject(subject_id: int, db=Depends(get_db)):
+    subject = db.query(Subject).filter(Subject.id == subject_id).first()
+    if not subject: raise HTTPException(404, "Subject not found")
+    topics = db.query(Topic).filter(Topic.subject_id == subject_id).all()
+    return {
+        "subject": {"id": subject.id, "name": subject.name, "level": subject.level},
+        "topics": [
+            {"id": t.id, "title": t.title, "has_image": bool(t.image_url)}
+            for t in topics
+        ]
+    }
+
+@app.get("/theory/{topic_id}")
+def get_theory_breakdown(topic_id: int, username: str = None, db=Depends(get_db)):
+    """Generates the theory breakdown for a topic. If the admin attached a
+    custom note/question, it's woven into the prompt so the AI explains
+    around it. If an image is attached, its URL is returned for the
+    frontend to render alongside the AI explanation."""
+    topic = db.query(Topic).filter(Topic.id == topic_id).first()
+    if not topic: raise HTTPException(404, "Topic not found")
+    subject = db.query(Subject).filter(Subject.id == topic.subject_id).first()
+    subject_name = subject.name if subject else "General"
+    level         = subject.level if subject else "SSS"
+
+    if topic.admin_notes:
+        prompt = f"""You are Ox-Bridge AI Tutor for Nigerian {level} students studying {subject_name}.
+        Topic: '{topic.title}'.
+        The teacher has provided this specific question/note to build the lesson around:
+        \"{topic.admin_notes}\"
+        Write a clear theory breakdown: (1) simple explanation of the concept,
+        (2) how it relates to the teacher's note above, (3) one worked example,
+        (4) a short summary. Use Nigerian WAEC/JAMB/NECO exam style."""
+    else:
+        prompt = f"""You are Ox-Bridge AI Tutor for Nigerian {level} students studying {subject_name}.
+        Topic: '{topic.title}'.
+        Write a clear theory breakdown: (1) simple explanation of the concept,
+        (2) one worked example, (3) a short summary a student can revise from.
+        Use Nigerian WAEC/JAMB/NECO exam style."""
+
+    explanation = get_ai_response(prompt)
+
+    if username:
+        user = db.query(User).filter(User.username == username).first()
+        if user: user.last_learned_topic = topic.title; db.commit()
+
+    return {
+        "topic_id":   topic.id,
+        "title":      topic.title,
+        "subject":    subject_name,
+        "level":      level,
+        "explanation": explanation,
+        "image_url":  topic.image_url,
+        "has_image":  bool(topic.image_url)
+    }
+
+# ============================================================
+# ADMIN — MONITORING
+# ============================================================
+@app.get("/admin/monitor/overview")
+def monitor_overview(db=Depends(get_db)):
+    today = today_str()
+    total_users     = db.query(User).count()
+    ai_calls_today  = db.query(ActivityLog).filter(
+        ActivityLog.action == "ai_chat", ActivityLog.created_at.like(f"{today}%")
+    ).count()
+    active_today = db.query(ActivityLog.username).filter(
+        ActivityLog.created_at.like(f"{today}%"), ActivityLog.username.isnot(None)
+    ).distinct().count()
+    total_logs = db.query(ActivityLog).count()
+    return {
+        "total_users":        total_users,
+        "active_users_today": active_today,
+        "ai_calls_today":     ai_calls_today,
+        "total_activity_logs": total_logs,
+        "cache_size":         len(ai_cache)
+    }
+
+@app.get("/admin/monitor/activity")
+def monitor_activity(username: str = None, action: str = None, limit: int = 50, db=Depends(get_db)):
+    query = db.query(ActivityLog)
+    if username: query = query.filter(ActivityLog.username == username)
+    if action:   query = query.filter(ActivityLog.action == action)
+    logs = query.order_by(ActivityLog.id.desc()).limit(limit).all()
+    return [{"id": l.id, "username": l.username, "action": l.action,
+              "path": l.path, "created_at": l.created_at} for l in logs]
+
+@app.get("/admin/monitor/usage/{username}")
+def monitor_user_usage(username: str, db=Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    if not user: raise HTTPException(404, "User not found")
+    logs = db.query(ActivityLog).filter(ActivityLog.username == username).all()
+    by_action = {}
+    for l in logs:
+        by_action[l.action] = by_action.get(l.action, 0) + 1
+    return {
+        "username":        username,
+        "total_actions":   len(logs),
+        "breakdown":       by_action,
+        "quiz_count":      db.query(QuizResult).filter(QuizResult.user_id == user.id).count(),
+        "ai_messages":     db.query(AIChatHistory).filter(AIChatHistory.user_id == user.id, AIChatHistory.role == "user").count(),
+        "coins":           user.coins or 0,
+        "score":           user.progress_score or 0
+    }
 
 # ============================================================
 # CACHE
