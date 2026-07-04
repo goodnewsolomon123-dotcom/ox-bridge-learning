@@ -163,6 +163,19 @@ class PastQuestion(Base):
     correct_answer = Column(String)
     explanation    = Column(String, nullable=True)
 
+class WaecTheoryQuestion(Base):
+    __tablename__ = "waec_theory_questions"
+    id            = Column(Integer, primary_key=True, index=True)
+    exam_type     = Column(String, index=True)   # WAEC or NECO
+    year          = Column(Integer, index=True)
+    subject       = Column(String,  index=True)
+    topic         = Column(String,  nullable=True)
+    question_text = Column(String)
+    model_answer  = Column(String,  nullable=True)
+    image_url     = Column(String,  nullable=True)  # base64 diagram
+    marks         = Column(Integer, nullable=True, default=10)
+    created_at    = Column(String,  nullable=True)
+
 class DailyChallenge(Base):
     __tablename__ = "daily_challenges"
     id             = Column(Integer, primary_key=True, index=True)
@@ -622,6 +635,16 @@ class PastQuestionCreate(BaseModel):
     option_d:       str
     correct_answer: str
     explanation:    Optional[str] = None
+
+class WaecTheoryCreate(BaseModel):
+    exam_type:     str              # WAEC or NECO
+    year:          int
+    subject:       str
+    topic:         Optional[str] = None
+    question_text: str
+    model_answer:  Optional[str] = None
+    image_url:     Optional[str] = None   # base64 image string
+    marks:         Optional[int] = 10
 
 class DailyChallengeSubmit(BaseModel):
     username: str
@@ -1593,6 +1616,186 @@ def search_web(query: str):
                 for r in res.json()["results"]]}
     except Exception as e: return {"error": f"Search failed: {str(e)}"}
     return {"error": "No results found"}
+
+# ============================================================
+# WAEC / NECO THEORY PAST QUESTIONS
+# ============================================================
+
+@app.post("/admin/add-waec-theory")
+def add_waec_theory(data: WaecTheoryCreate, db=Depends(get_db)):
+    """Admin adds a WAEC/NECO theory past question"""
+    try:
+        q = WaecTheoryQuestion(
+            exam_type     = data.exam_type.upper(),
+            year          = data.year,
+            subject       = data.subject,
+            topic         = data.topic,
+            question_text = data.question_text,
+            model_answer  = data.model_answer,
+            image_url     = data.image_url,
+            marks         = data.marks or 10,
+            created_at    = now_str()
+        )
+        db.add(q); db.commit(); db.refresh(q)
+        return {"success": True, "id": q.id, "message": f"Theory question added for {data.subject} {data.exam_type} {data.year}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/waec-theory/subjects")
+def get_waec_theory_subjects(db=Depends(get_db)):
+    """Get all subjects that have WAEC/NECO theory questions"""
+    try:
+        rows = db.execute(
+            text("""
+                SELECT DISTINCT subject, exam_type, COUNT(*) as total
+                FROM waec_theory_questions
+                GROUP BY subject, exam_type
+                ORDER BY subject, exam_type
+            """)
+        ).fetchall()
+        result = {}
+        for row in rows:
+            subj = row[0]
+            if subj not in result:
+                result[subj] = {"subject": subj, "exams": [], "total": 0}
+            result[subj]["exams"].append({"exam_type": row[1], "count": row[2]})
+            result[subj]["total"] += row[2]
+        return list(result.values())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/waec-theory/questions")
+def get_waec_theory_questions(
+    subject:   str = Query(...),
+    exam_type: str = Query("WAEC"),
+    year:      Optional[int] = Query(None),
+    db=Depends(get_db)
+):
+    """Get theory questions filtered by subject, exam type and optionally year"""
+    try:
+        query = db.query(WaecTheoryQuestion).filter(
+            WaecTheoryQuestion.subject   == subject,
+            WaecTheoryQuestion.exam_type == exam_type.upper()
+        )
+        if year:
+            query = query.filter(WaecTheoryQuestion.year == year)
+        questions = query.order_by(WaecTheoryQuestion.year.desc()).all()
+        return [
+            {
+                "id":            q.id,
+                "exam_type":     q.exam_type,
+                "year":          q.year,
+                "subject":       q.subject,
+                "topic":         q.topic,
+                "question_text": q.question_text,
+                "model_answer":  q.model_answer,
+                "has_image":     bool(q.image_url),
+                "image_url":     q.image_url,
+                "marks":         q.marks
+            }
+            for q in questions
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/waec-theory/years")
+def get_waec_theory_years(
+    subject:   str = Query(...),
+    exam_type: str = Query("WAEC"),
+    db=Depends(get_db)
+):
+    """Get all available years for a subject"""
+    try:
+        rows = db.query(WaecTheoryQuestion.year).filter(
+            WaecTheoryQuestion.subject   == subject,
+            WaecTheoryQuestion.exam_type == exam_type.upper()
+        ).distinct().order_by(WaecTheoryQuestion.year.desc()).all()
+        return {"years": [r[0] for r in rows]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/waec-theory/explain/{question_id}")
+def explain_waec_theory(question_id: int, username: Optional[str] = None, db=Depends(get_db)):
+    """AI generates a detailed explanation for a theory question"""
+    q = db.query(WaecTheoryQuestion).filter(WaecTheoryQuestion.id == question_id).first()
+    if not q:
+        raise HTTPException(status_code=404, detail="Question not found")
+    model_answer_line = ("Model Answer provided:\n" + q.model_answer) if q.model_answer else "No model answer provided — generate a comprehensive answer."
+    prompt = f"""You are an expert Ox-Bridge AI Tutor for Nigerian {q.exam_type} students.
+
+Subject: {q.subject}
+Year: {q.year}
+{"Topic: " + q.topic if q.topic else ""}
+Marks: {q.marks} marks
+
+Theory Question:
+{q.question_text}
+
+{model_answer_line}
+
+Please provide:
+1. A clear, step-by-step explanation of the question
+2. The key points that earn marks in {q.exam_type} marking scheme
+3. A well-structured model answer a student should write
+4. Common mistakes students make on this question
+5. A quick revision tip
+
+Write in simple, clear English suitable for Nigerian SS3 students preparing for {q.exam_type}."""
+
+    explanation = get_ai_response(prompt)
+    return {
+        "id":            q.id,
+        "subject":       q.subject,
+        "exam_type":     q.exam_type,
+        "year":          q.year,
+        "topic":         q.topic,
+        "question_text": q.question_text,
+        "model_answer":  q.model_answer,
+        "image_url":     q.image_url,
+        "marks":         q.marks,
+        "explanation":   explanation
+    }
+
+@app.delete("/admin/waec-theory/{question_id}")
+def delete_waec_theory(question_id: int, db=Depends(get_db)):
+    """Admin deletes a theory question"""
+    q = db.query(WaecTheoryQuestion).filter(WaecTheoryQuestion.id == question_id).first()
+    if not q:
+        raise HTTPException(status_code=404, detail="Question not found")
+    db.delete(q); db.commit()
+    return {"success": True, "message": f"Theory question #{question_id} deleted"}
+
+@app.get("/admin/waec-theory/list")
+def list_waec_theory_admin(
+    subject:   Optional[str] = Query(None),
+    exam_type: Optional[str] = Query(None),
+    db=Depends(get_db)
+):
+    """Admin view all theory questions"""
+    try:
+        query = db.query(WaecTheoryQuestion)
+        if subject:   query = query.filter(WaecTheoryQuestion.subject == subject)
+        if exam_type: query = query.filter(WaecTheoryQuestion.exam_type == exam_type.upper())
+        questions = query.order_by(WaecTheoryQuestion.year.desc()).all()
+        return {
+            "total": len(questions),
+            "questions": [
+                {
+                    "id":            q.id,
+                    "exam_type":     q.exam_type,
+                    "year":          q.year,
+                    "subject":       q.subject,
+                    "topic":         q.topic,
+                    "question_text": q.question_text[:80]+"..." if q.question_text and len(q.question_text)>80 else q.question_text,
+                    "has_image":     bool(q.image_url),
+                    "has_answer":    bool(q.model_answer),
+                    "marks":         q.marks
+                }
+                for q in questions
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
 # WEBSOCKET LIVE CLASSROOM
