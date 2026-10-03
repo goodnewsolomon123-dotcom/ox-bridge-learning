@@ -10,3 +10,4 @@ PyJWT==2.9.0
 requests==2.32.3
 python-multipart==0.0.9
 cloudinary==1.44.2
+pywebpush
